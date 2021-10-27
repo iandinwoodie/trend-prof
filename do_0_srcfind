@@ -1,0 +1,171 @@
+#!/usr/bin/perl -w
+
+#
+# see License.txt for copyright and terms of use
+#
+
+# Step 0: Attempts to match gcov metadata in your obj directory to
+# their corresponding source files.  After step 0 is the last place
+# where user intervention may be required.
+
+use strict;
+use File::Find;
+use FindBin;
+use lib $FindBin::Bin;
+use trend_prof_common;
+my $debugMode = -f "$FindBin::Bin/.debug";
+
+# input: a directory
+# output: a configuration file 
+# 
+# filenames must not start with whitespace nor contain newlines        
+
+die "Usage:\n\t $0 source_dir obj_dir config_file fail_if_no_find\n" unless 2 == $#ARGV;
+my ($srcDir, $objDir, $outfile, $failIfNoFind) = @ARGV;
+die $srcDir unless -d $srcDir;
+die $objDir unless -d $objDir;
+open(OUT, '>', $outfile) or die "open $outfile: $!";
+my $failFast = !(defined($failIfNoFind) && $failIfNoFind =~ m/^(no|n|false|f|0)$/i);
+my $thereWasABadFile = 0;
+
+# dsw: was this
+# my @gcnoFiles = split(/\n/, `find $objDir -follow \\( -name "*.bb" -o -name "*.gcno" \\) -printf '%P\n'`);
+die unless defined $objDir;
+my @gcnoFiles;
+sub collect_gcno_files {
+    if (/\.bb\z/s || /\.gcno\z/s) {
+        my $name0 = $File::Find::name;
+        die unless $name0 =~ s|^$objDir/||;
+        push @gcnoFiles, $name0;
+    }
+}
+File::Find::find( {wanted => \&collect_gcno_files, follow => 1}, "$objDir");
+die "I cannot find any .gcno files in $objDir.  This very probably means that you built your program without the necessary flags: -ftest-coverage -fprofile-arcs.  Please do that and try again.\n\n"
+    unless @gcnoFiles;
+
+my @exts = ('c', 'cc', 'cpp', 'cxx',
+            # dsw: you forgot these
+            'c++', 'C'
+            ); #'h'
+# dsw: pulled this out so that I could refer to it in a sub
+my @attempts;
+my $target_search_file;
+# dsw: this is for use in a find
+sub collect_source_files {
+    # dsw: NOTE: these are hard-coded from the above @exts list
+    if (/^.*${target_search_file}\.c\z/s ||
+        /^.*${target_search_file}\.cc\z/s ||
+        /^.*${target_search_file}\.cpp\z/s ||
+        /^.*${target_search_file}\.cxx\z/s ||
+        /^.*${target_search_file}\.c\+\+\z/s ||
+        /^.*${target_search_file}\.C\z/s
+        ) {
+        # $File::Find::name includes the directory which is what we want
+        # $_ is just the file name
+        push @attempts, $File::Find::name;
+    }
+}
+# dsw: this is for use in a find
+sub collect_header_files {
+    if (/^.*${target_search_file}\.h\z/s) {
+        push @attempts, $File::Find::name;
+    }
+}
+
+foreach my $gcno (@gcnoFiles) {
+    my $gcnoFile = "$objDir/$gcno";
+    die unless -f $gcnoFile;
+
+    my $srcfile;
+    my $path;
+    my $file;
+    if ($gcno =~ m,^(.*/)?([^/]*)\.(?:bb|gcno)$,) {
+        $file = $2;
+        $path = defined($1) ? $1 : '.';
+        $path =~ s,/+$,,;
+    } else { die $gcno; }
+     
+    # Ad-hoc / heuristic stuff here:
+    # We look for the source file in some likely places.
+    # Really we want build-interceptor to tell us where the source file <-> .da file map.
+    for (my $j=0; $j<3; ++$j) {
+        my @paths = ("$srcDir/$path", "$objDir/$path");
+        foreach my $attemptPath  (@paths) {
+            foreach my $attemptExt (@exts) {
+                my $attempt = "$file.$attemptExt";
+                if (-f "$attemptPath/$attempt") {
+                    $srcfile = "$attemptPath/$attempt";
+                    last;
+                }
+                # a dumb hack for imageMagick
+                $attempt = $file;
+                $attempt =~ s/^.*\_la\-(.+)$/$1/;
+                $attempt = "$attempt.$attemptExt";
+                if (-f "$attemptPath/$attempt") {
+                    $srcfile = "$attemptPath/$attempt";
+                    last;
+                }
+            }
+            last if $srcfile;
+        }
+        last if $srcfile;
+        $path =~ s,/[^/]+/*$,,;
+    }
+    # haven't found it yet, try a search
+    if (!$srcfile) {
+        undef @attempts;
+        $target_search_file = $file;
+        File::Find::find( {wanted => \&collect_source_files, follow => 1}, $srcDir);
+
+        # if nothing there, try $objDir
+        if (-1 == $#attempts) {
+            File::Find::find( {wanted => \&collect_source_files, follow => 1}, $objDir);
+        }
+        # if nothing there, try looking for a .h in $srcDir
+        if (-1 == $#attempts) {
+            File::Find::find( {wanted => \&collect_header_files, follow => 1}, $srcDir);
+        }
+        # if nothing there, try looking for a .h in $objDir
+        if (-1 == $#attempts) {
+            File::Find::find( {wanted => \&collect_header_files, follow => 1}, $objDir);
+        }
+        if ($#attempts > 0) {
+            warn("*** MULTIPLE MATCHES for $gcnoFile: {" . join("|",@attempts) . "\n");
+            my $mangledName = mangle($gcno);
+            print OUT (formatEntry($mangledName, $gcnoFile, "#pick#one#" . join("#",@attempts) . "#"));
+            $thereWasABadFile = 1;
+        }
+        elsif (-1 == $#attempts) {
+            warn("*** MISSING SOURCE FILE for $gcnoFile\n");
+            my $mangledName = mangle($gcno);
+            print OUT (formatEntry($mangledName, $gcnoFile, "#cannot#find#source#file#"));
+            $thereWasABadFile = 1;
+        } else {
+            die unless 0 == $#attempts;            
+            $srcfile = $attempts[0];
+        }
+    }
+    # if we found anything, $srcfile is set here
+    if ( $srcfile ) {
+        my $mangledName = mangle($srcfile);
+        print OUT formatEntry($mangledName, $gcnoFile, $srcfile);
+    }
+}
+close(OUT) or die "closing $outfile: $!";
+die "\n\nWARNING: There were some gcov metadata files for which I couldn't find the corresponding source.  $outfile was generated.  Subsequent steps will still collect and process data for these files, but unless you manually edit $outfile to point to the source, these files will not have annotated source available.\n\n\n" if ($failFast && $thereWasABadFile);
+print "All source files were found.\n" unless $thereWasABadFile;
+exit(0);
+
+sub formatEntry {
+    my ($displayName, $gcno, $source) = @_;
+    return "\nSourceFile:\n" 
+        . "   displayName=$displayName\n"
+        . "   gcno=$gcno\n"
+        . "   source=$source\n";
+}
+
+sub mangle {
+    my ($name) = @_;    
+    $name =~ s,^$srcDir/+,,x;
+    return mangleSourceFileName($name);
+}

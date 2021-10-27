@@ -1,0 +1,1019 @@
+#!/usr/bin/perl -w
+
+#
+# see License.txt for copyright and terms of use
+#
+
+# Step 4: Generates an html view of the results of profiling.
+
+use strict;
+use Cwd;
+use File::Find;
+use FindBin;
+use lib $FindBin::Bin;
+use trend_prof_common;
+my $debugMode = -f "$FindBin::Bin/.debug";
+use Archive::Zip qw( :ERROR_CODES :CONSTANTS );
+
+# **** Modes
+#
+# This program can be run in several different modes.
+#
+# Index: generate the index.html
+#
+# Single Source File: generate the annotated source file
+#
+# Single Greater Model: generate the greater model
+#
+# Everything: do all of the above for all source files and all models
+# (of all locations).
+
+# **** Nomenclature
+#
+# A 'location' is a source file, a line number withing that file, and
+# possibly a block number within that line.
+#
+# A 'fit' is everything generated as we compute a model from the raw
+# data for a particual location
+
+# **** Pseudo-code
+#
+# for each $view_dir/$srcfile/
+#     read $data_dir/$srcfile/source_lines
+#     for each $view_dir/$srcfile/$lineNumber
+#         read $view_dir/$srcfile/$lineNumber/$type.fit
+#     create $view_dir/$srcfile/index.html
+# create $view_dir/index.html
+
+
+my %userModes = (index_mode=>1, single_source_mode=>1, single_model_mode=>1, everything_mode=>1);
+
+# cmd line, checks
+die "Usage: $0 --mode=<mode> --data-dir=<data_dir> --fit-dir=<fit_dir> --view-dir=<view_dir> --title=<title> [--view={filelist|exp|count|evalAt=1000}]\n"
+  unless (3 <= $#ARGV);
+
+# parameters
+my $mode;                       # the user mode; see above
+my $dataDir;                    # directory containing the source files
+my $fitDir;                     # directory containing results of fitting
+my $viewDir;                    # directory containing the view; we build this
+my $title;                      # the title of the view index.html
+my @views;                      # sub-langauge of view parameters
+my $clusterFile;		# file containing a cluster number for each location
+
+# mode-specific paramters
+my $sourceFile_modeParam;       # the one source file we process in single_source_mode
+my $location_modeParam;         # the one location we process in single_model_mode
+my $runGnuplot;                 # should we run gnuplot after generating a gnuplot file?
+
+while(my $arg = shift @ARGV) {
+  if ($arg =~ /^--mode=(.*)$/) {
+    $mode = $1;
+  } elsif ($arg =~ /^--sourceFile_modeParam=(.*)$/) {
+    $sourceFile_modeParam = $1;
+  } elsif ($arg =~ /^--location_modeParam=(.*)$/) {
+    $location_modeParam = $1;
+  } elsif ($arg =~ /^--run-gnuplot$/) {
+    $runGnuplot++;
+  } elsif ($arg =~ /^--data-dir=(.*)$/) {
+    $dataDir = $1;
+  } elsif ($arg =~ /^--cluster-file=(.*)$/) {
+    $clusterFile = $1;
+  } elsif ($arg =~ /^--fit-dir=(.*)$/) {
+    $fitDir = $1;
+  } elsif ($arg =~ /^--view-dir=(.*)$/) {
+    $viewDir = $1;
+  } elsif ($arg =~ /^--title=(.*)$/) {
+    $title = $1;
+  } elsif ($arg =~ /^--view=(.*)$/) {
+    push @views, $1;
+  } else {
+    die "Illegal argument:$arg:\n";
+  }
+}
+
+# check argument integrity
+die "illegal mode:$mode:\n" unless $userModes{$mode};
+$title = 'Default Title' unless defined $title;
+
+# make sure file system looks the way we want
+die $clusterFile if (defined($clusterFile) && !(-f $clusterFile));
+die $dataDir unless -d $dataDir;
+die $fitDir  unless -d $fitDir;
+if (! -d $viewDir) {
+  mkdir $viewDir;
+}
+die $viewDir unless -d $viewDir;
+# set flags according to the mode
+my $renderLocationStuff = ($mode eq 'everything_mode'    || $mode eq 'single_model_mode');
+my $renderSourceFile    = ($mode eq 'everything_mode'    || $mode eq 'single_source_mode');
+my $renderOneSourceFile = ($mode eq 'single_source_mode' || $mode eq 'single_model_mode');
+my $renderOutputSummary = ($mode eq 'everything_mode'    || $mode eq 'index_mode');
+if (defined $sourceFile_modeParam) {
+  die unless $mode eq 'single_source_mode' || $mode eq 'single_model_mode';
+}
+if (defined $location_modeParam) {
+  die unless $mode eq 'single_model_mode';
+}
+
+# map a location to its fit
+my %loc2fit;
+
+# the fit for the special 'total' location which is the total of basic
+# blocks for the whole program
+my $totalFit;
+
+# keep track of source files for which we process a location
+my %srcFiles;
+
+# read clusters in
+my %loc2cluster;
+my @cluster2locs;
+if (defined($clusterFile)) {
+    readClusterFile(\%loc2cluster, \@cluster2locs, $clusterFile);
+}
+
+# foreach zip file in $fitDir, read in all the fits
+opendir(FITDIR, $fitDir) or die "ERROR: can't open $fitDir: $!";
+while (my $fitFile = readdir(FITDIR)) {
+    next if $fitFile eq '.' || $fitFile eq '..';
+    my $infile = "$fitDir/$fitFile";
+    my $dataptsFile = "$dataDir/$fitFile"; $dataptsFile =~ s,\.fits\.zip$,.zip,;
+    if (! -f $infile) {
+        warn "WARNING: ignoring non-file: '$infile'\n" if $debugMode;
+        next;
+    }
+    # open fit file
+    my $fitZip = Archive::Zip->new();
+    unless ($fitZip->read($infile) == AZ_OK) { 
+        warn "WARNING: skipping non-zip file '$infile'\n" if $debugMode;
+        next;
+    }
+    #open data points file
+    my $dataptsZip = Archive::Zip->new();
+    unless ($dataptsZip->read($dataptsFile) == AZ_OK) { 
+        if ($debugMode) {
+            die "ERROR ('$infile'): Couldn't find data points file '$dataptsFile'";
+        } else {
+            warn "WARNING (SKIPPING '$infile'): Couldn't find data points file '$dataptsFile'\n";
+            next;
+        }
+    }
+    my @sizes = split("\t", $dataptsZip->contents("workload_sizes"));
+    # the mode determines which / how many locations we want to look at
+    my @locs;
+    if ($renderOutputSummary) { 
+        @locs = $fitZip->memberNames(); 
+    } elsif ($mode eq 'single_source_mode') { 
+        @locs = map {($_)->fileName()} $fitZip->membersMatching("^$sourceFile_modeParam/"); 
+    } elsif ($mode eq 'single_model_mode') { 
+        my $loc = "$sourceFile_modeParam/$location_modeParam"; 
+        @locs = ($loc);
+        next unless $fitZip->memberNamed($loc);
+    }
+    foreach my $loc (@locs) {
+        if ('total' eq $loc) {
+            # note: very similar to the case below
+            my $locDir = "$viewDir/total";
+            mkdir $locDir unless -d $locDir;
+            die "ERROR: couldn't mkdir '$locDir': $!" unless -d $locDir;
+            # compute best fit for location
+            my %typeToFit;
+            readFitsForLocation(\%typeToFit, $fitZip, $loc);
+            my @fitRankings = rankFitsForLocation(\%typeToFit);
+            next unless @fitRankings;
+            # renders out the graph of the model
+            if ($renderOutputSummary) {
+                my $threshhold = $typeToFit{$fitRankings[0]}->{'score'} - 0.2;
+                $threshhold = 0 if $threshhold < 0;
+                outputGnuplot($loc, \@sizes, $dataptsZip, \%typeToFit, $locDir, $threshhold);
+                outputLocationSummary(\%typeToFit, \@fitRankings, $threshhold, 
+                                      "Total basic blocks executed by a workload",
+                                      "$locDir/index.html", $#sizes + 1);
+            }
+            $totalFit = $typeToFit{ $fitRankings[0] };
+        }
+        elsif ($loc =~ m,^(.*)/(\d+)(\.[^\.]*)?$,) {
+            my ($srcFile, $lineNumber, $block) = ($1, $2, $3);
+            $block = '' if !defined($block);
+            $srcFiles{$srcFile} += 1;
+            # make directories
+            my $srcfileDir = "$viewDir/$srcFile";
+            mkdir $srcfileDir unless -d $srcfileDir;
+            die "ERROR: couldn't mkdir '$srcfileDir': $!" unless -d $srcfileDir;
+            my $locDir = "$srcfileDir/$lineNumber$block";
+
+            mkdir $locDir unless -d $locDir;
+            die "ERROR: couldn't mkdir '$locDir': $!" unless -d $locDir;
+            # compute best fit for location
+            my %typeToFit;
+            readFitsForLocation(\%typeToFit, $fitZip, $loc);
+            my @fitRankings = rankFitsForLocation(\%typeToFit);
+            next unless @fitRankings;
+            # renders out the graph of the model
+            if ($renderLocationStuff) {
+                my $threshhold = $typeToFit{$fitRankings[0]}->{'score'} - 0.2;
+                $threshhold = 0 if $threshhold < 0;
+                outputGnuplot($loc, \@sizes, $dataptsZip, \%typeToFit, $locDir, $threshhold);
+                outputLocationSummary(\%typeToFit, \@fitRankings, $threshhold, 
+                                      "$srcFile, Line $lineNumber" . ($block ? ", Block $block" : ''),
+                                      "$locDir/index.html", $#sizes + 1);
+            }
+            $loc2fit{$loc} = $typeToFit{ $fitRankings[0] };
+            $loc2fit{$loc}->{'file'} = $srcFile;
+            $loc2fit{$loc}->{'line'} = $lineNumber;
+            $loc2fit{$loc}->{'block'} = $block;
+            $loc2fit{$loc}->{'block'} =~ s/^\.//;
+            $loc2fit{$loc}->{'bb'} = "$lineNumber$block";
+	    $loc2fit{$loc}->{'cluster'} = $loc2cluster{$loc} if defined($loc2cluster{$loc});
+        } # if
+        else {
+            warn "ERROR: Unparsable location '$loc'" if $debugMode;
+        }
+    } # foreach loc
+} # foreach zip file full of fits 
+closedir(FITDIR) or die "ERROR: can't close $fitDir: $!";
+
+# output annotated source files
+if ($renderSourceFile) {
+    foreach my $srcFile (keys(%srcFiles)) {
+        # read in the source code with line numbers
+        my $srcLinesFile = "source_files/$srcFile";
+        if (-r $srcLinesFile) {
+            my @srcLines;
+            readSourceFile(\@srcLines, $srcLinesFile);
+            outputAnnotatedSourceFile(\%loc2fit, \@srcLines, $srcFile, "$viewDir/$srcFile/index.html");
+        } else {
+            warn "WARNING: no source code found for '$srcFile'";
+        }
+    }
+}
+
+# output index.html file for the whole data set
+if ($renderOutputSummary) {
+    my @srcfiles = keys(%srcFiles);        
+    outputOverallSummary(\%loc2fit, $totalFit, \@srcfiles, \@views, "$viewDir/index.html");
+}
+
+# some summary stuff for clusters
+if ($renderOutputSummary && @cluster2locs) {
+    my $clusterList = "$viewDir/clusters.html";
+    open(CL, '>', $clusterList) or die "ERROR cannot open '$clusterList': $!";
+    print CL "<html>\n<head><title>Cluster List for $title</title></head>\n";
+    print CL "<body>\n<table>";
+    print CL trow(th("Cluster") . th("Size"));
+    for (my $i=0; $i <= $#cluster2locs; ++$i) {
+        #my $istr = sprintf('%0.4d', $i);
+        my $clustFile = "cluster$i.html";
+        print CL trow( td(ahref($clustFile, "C[$i]")) . td(1+$#{$cluster2locs[$i]}) );
+        outputClusterSummary(\%loc2fit, $cluster2locs[$i], \@cluster2locs, "$viewDir/$clustFile", "Cluster $i for $title");
+    }
+    print CL "\n</table>\n</body>\n</html>\n\n";
+    close(CL) or die "ERROR cannot close '$clusterList': $!";
+}
+
+
+# print out the url of the index for user's convenience
+#print("Results at:\n   file://" . getcwd . "/$viewDir/index.html\n");
+exit(0);
+
+######################################################################
+sub outputClusterSummary {
+    my ($loc2fit, $locs, $cluster2locs, $file, $title) = @_;
+    open(CS, '>', $file) or die "ERROR cannot open '$file': $!";
+    print CS "<html>\n<head><title>$title</title></head>\n";
+    print CS "<body>\n";
+    print CS ahref('clusters.html', "Cluster List");
+    print CS "<table>\n";
+    print CS trow( th("File", "align=right") 
+		   . th("Line") 
+		   . th()
+		   . th("Model", "align=right") 
+		   . th("Goodness (R^2)") 
+		   . ( defined($clusterFile) ? th("Cluster") : '' )
+		 );    
+    foreach my $loc (sort {compareFitLocs($loc2fit->{$a}, $loc2fit->{$b})} @$locs) {
+        if (defined($loc2fit->{$loc})) {
+            print CS summaryLine( $loc2fit->{$loc} );
+        } else {
+            print CS trow(td($loc));
+        }
+    }
+    print CS "\n</table>";
+
+    # compute intra-cluster goodness
+    if ($debugMode) {
+        my $dataptsZip = Archive::Zip->new();
+        unless ($dataptsZip->read("2_linewise/data.zip") == AZ_OK) { 
+            die;
+        }
+        my $worst = 1.0;
+        my $worstx=''; 
+        my $worsty='';
+        foreach my $xloc (@$locs) {
+            my @xs = split(/\s+/, $dataptsZip->contents($xloc));
+            foreach my $yloc (@$locs) {
+                my @ys = split(/\s+/, $dataptsZip->contents($yloc));
+                my ($n, $coef0, $coef1, $rsq, @rest) = fit('linear', "$xloc:$yloc", \@xs, \@ys, 1);
+                if (defined($rsq) && $rsq < $worst) {
+                    $worst = $rsq;
+                    $worstx = $xloc;
+                    $worsty = $yloc;
+                }
+            }
+        }
+        if ($worstx) {
+            print CS "Worst intra-cluster fit: $worstx by $worsty with R^2=$worst";
+        } else {
+            print CS "Cluster is tight; no intra-cluster fits worse than 1.0";
+        }
+    }
+
+    #compute some inter-cluster power law fits
+    if ($debugMode) {
+        my $dataptsZip = Archive::Zip->new();
+        unless ($dataptsZip->read("2_linewise/data.zip") == AZ_OK) { 
+            die;
+        }
+	my $xloc = $locs->[0];
+	my @xs = split(/\s+/, $dataptsZip->contents($xloc));
+	print CS "\n\n<table>\n";
+	print CS trow( th("Cluster") 
+		       . th("Fit")
+		       . th("R^2")
+		     );
+        for (my $clust=0; $clust <= $#{$cluster2locs}; ++$clust) {	    
+	    my $yloc = $cluster2locs->[$clust]->[0];
+	    next if $xloc eq $yloc;
+            my @ys = split(/\s+/, $dataptsZip->contents($yloc));
+	    my ($n, $coef0, $coef1, $rsq, @rest) = fit('powerlaw', "$xloc:$yloc", \@xs, \@ys, 1);
+	    my %fit = ( 'type'=>'powerlaw', 'coef0'=>$coef0, 'coef1'=>$coef1, 
+			'cluster'=>$clust , 'rsq'=>$rsq
+		      );
+	    print CS trow( td(clusterLink(\%fit))
+			   . td(formatFitFunctionHtml(\%fit))
+			   . td(formatRsq(\%fit))
+			 );
+	}
+	print CS "\n</table>\n";
+    }
+    #
+    print CS "\n</body>\n</html>\n\n";
+    close(CS) or die "ERROR cannot close '$file': $!";
+}
+
+
+######################################################################
+sub readFitsForLocation {
+    my ($typeToFit, $fitZip, $loc) = @_;
+    my $fits = $fitZip->contents($loc);
+    if ($fits) {
+        my @fitLines = split("\n", $fits);
+        foreach my $fitLine (@fitLines) {
+            my %fit;
+            parseFitLine(\%fit, $fitLine, $debugMode);
+            $typeToFit->{$fit{'type'}} = \%fit if defined($fit{'type'});
+        }
+    }
+}
+
+
+######################################################################
+sub rankFitsForLocation {
+    my ($typeToFit) = @_;
+    foreach my $type (keys(%$typeToFit)) {
+        $typeToFit->{$type}->{'score'} = scoreGoodnessOfFit($typeToFit->{$type});
+    }
+    return (sort { $typeToFit->{$b}->{'score'} <=> $typeToFit->{$a}->{'score'} } (keys(%$typeToFit)));
+}
+
+######################################################################
+sub scoreGoodnessOfFit {
+    my ($fit) = @_;
+    return 2 unless defined($fit->{'mre'});
+    return 2 unless defined($fit->{'rsq'});
+    # penalize non-linear fits that just predict constants
+    return 0 if 'powerlaw' eq $fit->{'type'} && (0.0 == $fit->{'coef0'} || 0.0 == $fit->{'coef1'});
+    return 0 if 'exp' eq $fit->{'type'}; # not interested in exp fits
+    return 0 if 'log' eq $fit->{'type'}; # not interested in log fits
+    return 0 if 'log' eq $fit->{'type'} && 0.0 == $fit->{'coef1'};
+    return 0 if 'exp' eq $fit->{'type'} && (0.0 == $fit->{'coef0'} || 0.0 == $fit->{'coef1'});
+    return 1.0 / $fit->{'mre'};
+#     return (0.01 / $fit->{'mre'}) if (0.0 == $fit->{'rsq'}); # probably a constant fit
+#     return ($fit->{'rsq'} / $fit->{'mre'});
+}
+
+######################################################################
+sub gnuplotFitFunction {
+    my ($fit) = @_;
+    return 'woops' unless defined($fit->{'type'});
+    return 'woops' unless defined($fit->{'coef0'});
+    return 'woops' unless defined($fit->{'coef1'});
+    my $coef0 = $fit->{'coef0'};
+    my $coef1 = $fit->{'coef1'};
+    if ('powerlaw' eq $fit->{'type'}) {
+        my $ff = "$coef0 * x ** $coef1";
+        if (defined($fit->{'sx'}) && defined($fit->{'sy'})) {
+            my $i1 = exp( ($fit->{'sy'} - 1.0 * $fit->{'sx'}) / $fit->{'n'} );
+            $ff .= ", $i1 * x with dots";
+            my $i2 = exp( ($fit->{'sy'} - 2.0 * $fit->{'sx'}) / $fit->{'n'} );
+            $ff .= ", $i2 * x**2 with dots";
+            my $i3 = exp( ($fit->{'sy'} - 3.0 * $fit->{'sx'}) / $fit->{'n'} );
+            $ff .= ", $i3 * x**3 with dots";
+        }
+        return $ff
+    }
+    elsif ('linear' eq $fit->{'type'}) {
+        return "$coef0 + $coef1 * x";
+    }
+    elsif ('exp' eq $fit->{'type'}) {
+        return "$coef0 * exp($coef1 * x)";
+    }
+    elsif ('log' eq $fit->{'type'}) {
+        return "$coef0 + $coef1 * log(x)";
+    }
+    else {
+        warn "Unknown fit type $fit->{type}\n";
+        return "1";
+    }
+}
+
+######################################################################
+sub outputFilteredDatapointsAndResiduals {
+    my ($fit, $xs, $ys, $filteredDataFile) = @_;
+    return unless defined($fit);
+    open(FILT, '>', $filteredDataFile) or die "ERROR: couldn't open '$filteredDataFile': $!";
+    my $dologx;
+    my $dology;
+    if ('linear' eq $fit->{'type'})      { $dologx = 0; $dology = 0; }
+    elsif ('powerlaw' eq $fit->{'type'}) { $dologx = 1; $dology = 1; }
+    elsif ('log' eq $fit->{'type'})      { $dologx = 1; $dology = 0; }
+    elsif ('exp' eq $fit->{'type'})      { $dologx = 0; $dology = 1; }
+    else { die "Unknown type: '$fit->{'type'}'\n"; }
+    my $slope = $fit->{'coef1'};
+    my $intercept = $dology ? log($fit->{'coef0'}) : $fit->{'coef0'};
+    for (my $idx=0; $idx <= $#{$xs}; ++$idx) {
+        # untransformed point
+        my $ux = $xs->[$idx];
+        my $uy = $ys->[$idx];
+        die "STRANGE ERROR: ux undef; info='$filteredDataFile'" unless defined($ux);
+        die "STRANGE ERROR: uy undef; info='$filteredDataFile'" unless defined($uy);
+        if ( ($uy<=0) || ($dologx && $ux<=0) ) {
+            # ignored point
+            print FILT "\n";
+        } else {
+            # now take the logs if applicable
+            my $x = $dologx ? log($ux) : $ux;
+            my $y = $dology ? log($uy) : $uy;
+            # the model's prediction and the residual
+            my $yhat = $intercept + $slope*$x;
+            my $resid = $y - $yhat;
+            print FILT  (join("\t", $ux, $uy, $resid), "\n");
+        }
+    }
+    close(FILT) or die "ERROR: couldn't close '$filteredDataFile': $!";
+}
+
+######################################################################
+sub outputGnuplot {
+    my ($loc, $xs, $dataptsZip, $typeToFit, $outDir, $needMoreThan) = @_;
+    die $fitDir unless -d $fitDir;
+    die $outDir unless -d $outDir;
+    my %xaxis = ( 'linear'   => '',
+                  'powerlaw' => 'set logscale x',
+                  'exp'      => '',
+                  'log'      => 'set logscale x',
+                  );
+    my %yaxis = ( 'linear'   => '',
+                  'powerlaw' => 'set logscale y',
+                  'exp'      => 'set logscale y',
+                  'log'      => '',
+                  );
+    my $imageFormat = 'png';
+    foreach my $type (keys(%$typeToFit)) {
+        my $fit = $typeToFit->{$type};
+        next unless $fit->{'score'} > $needMoreThan;
+        my $fitFunction = gnuplotFitFunction($fit);
+        my $xax = $xaxis{$type};
+        my $yax = $yaxis{$type};
+        my $filteredDataFile = "$outDir/$type.filtered.data";
+        #my $residualsFile = "$outDir/$type.residuals";
+        $fit->{'gnuplotFile'} = "$type.gnuplot";
+        $fit->{'fitPlotFile'} = "$type.$imageFormat";
+        $fit->{'residualsPlotFile'} = "$type.residuals.$imageFormat";
+        # generate gnuplot if there was any variation in the data
+        if ($fit->{'avgssr'} > 0.0 || $fit->{'rsq'} > 0.0) {
+            my @ys = split(/\s+/, $dataptsZip->contents($loc));
+            outputFilteredDatapointsAndResiduals($fit, $xs, \@ys, $filteredDataFile);
+            my $gnuplotFile = "$outDir/$fit->{gnuplotFile}";
+            open(GP, '>', $gnuplotFile) or die "$gnuplotFile: $!";
+            print GP <<EOF
+set terminal $imageFormat
+set output '$outDir/$fit->{residualsPlotFile}'
+$xax
+set key top right
+plot '$filteredDataFile' using 1:3 title 'residuals' with points, -1 lt 3, 0 lt 2, 1;
+set output '$outDir/$fit->{fitPlotFile}'
+$yax
+set key bottom right
+plot $fitFunction, '$filteredDataFile' using 1:2 title 'observations' with points pointsize 2 pointtype 6;
+EOF
+            ;
+            close(GP) or die "$gnuplotFile: $!";
+            die "no gnuplot file: $gnuplotFile" unless -e $gnuplotFile;
+
+            # run gnuplot if the user asked us too
+            if ($runGnuplot) {
+                # FIX: we need to be run in the profdir and this is a way to check
+                die "do_4_view is not being run in the profdir" unless -d '4_view';
+                my $gnuplotCmd = "gnuplot $gnuplotFile";
+                print "$gnuplotCmd\n";
+                runOrDie($gnuplotCmd);
+            }
+        }
+    } # foreach type
+}
+
+######################################################################
+sub outputLocationSummary {
+    my ($typeToFit, $fitRankings, $needMoreThan, $title, $file, $totalPts) = @_;
+    open(LOCSUM, '>', $file) or die "$file: $!";
+    print LOCSUM "<html>\n<head><title>$title</title></head>\n<body>\n<table cellpadding=3 cellspacing=0 border=1>";
+    foreach my $type (@$fitRankings) {
+        my $fit = $typeToFit->{$type};
+        next unless $fit->{'score'} > $needMoreThan;
+        print LOCSUM trow( 
+                    td(describeFit($fit, $totalPts))
+                  . td(qq{<img src="$fit->{fitPlotFile}"><br>data points and $type fit}, 'align="center"')
+                  . td(qq{<img src="$fit->{residualsPlotFile}"><br>$type residuals}, 'align="center"')
+            );
+    }
+    print LOCSUM "\n</table>\n</body>\n</html>\n\n";
+    close(LOCSUM) or die "$file: $!";
+}
+
+######################################################################
+sub describeFit {
+    my ($fit, $totalPts) = @_;
+    my $r = 'align="right"';
+    my $l = 'align="left"';
+    my $c = 'align="center" colspan=3';
+    my $nb = "&nbsp;";
+    return "\n<table>"
+        . trow( th("best $fit->{type} fit", $c) )
+        . trow( td("count", $r) . td('=') . td(formatFitFunctionHtml($fit)) )
+        . trow( td("R^2", $r) . td('=') . td(formatRsq($fit)) )
+        . trow( td("mre", $r) . td('=') . td(formatMre($fit->{'mre'})) )
+        . trow( td("lin space mre", $r) . td('=') . td(formatMre($fit->{'umre'})) )
+        . trow( td("sumLinY", $r) . td('=') . td(sprintf('%.3g', $fit->{'sumLinY'})) )
+        . trow( td("avg&nbsp;ssr", $r) . td('=') . td(sprintf('%.4g', $fit->{'avgssr'})) )
+        . trow( td("points&nbsp;used", $r) . td('=') . td($fit->{'n'} . $nb . '/' .$nb . $totalPts) )
+        . trow( td("points&nbsp;ignored because&nbsp;(count==0)", $r) . td('=') 
+                . td(($totalPts - $fit->{'n'}) . '&nbsp;/&nbsp;' . $totalPts) )
+        . "\n</table>"
+        ;
+}
+
+######################################################################
+sub formatFitFunctionHtml {
+    my ($fit) = @_;
+    return '???' unless defined($fit);
+    return '???' unless defined($fit->{'type'});
+    return '???' unless defined($fit->{'coef0'});
+    return '???' unless defined($fit->{'coef1'});
+    if ('powerlaw' eq $fit->{'type'}) {
+        my $coef = $fit->{'coef0'};
+        my $exp = $fit->{'coef1'};
+        return '0' if 0 == $coef;
+        return $coef if 0 == $exp;
+        return 'n' if 1 == $coef && 1 == $exp;
+        return sprintf('%.2g&nbsp;n', $coef) if 1 == $exp;
+        return sprintf('n^%.3g', $exp) if 1 == $coef;
+        return sprintf('%.2g&nbsp;n^%.3g', $coef, $exp);
+    }
+    elsif ('linear' eq $fit->{'type'}) {
+        my $inter = $fit->{'coef0'};
+        my $slope = $fit->{'coef1'};
+        return $inter if 0 == $slope;
+        return 'n' if 1 == $slope && 0 == $inter;
+        return sprintf('%.2g&nbsp;+&nbsp;n', $inter) if 1 == $slope;
+        return sprintf('%.3g&nbsp;n', $slope) if 0 == $inter;
+        return sprintf('%.2g&nbsp;+&nbsp;%.3g&nbsp;n', $inter, $slope);
+    }
+    elsif ('exp' eq $fit->{'type'}) {
+        return sprintf('%.2g&nbsp;e^(%.3g&nbsp;n)', $fit->{'coef0'}, $fit->{'coef1'});
+    }
+    elsif ('log' eq $fit->{'type'}) {
+        return sprintf('%.2g&nbsp;+&nbsp;%.3g&nbsp;ln(n)', $fit->{'coef0'}, $fit->{'coef1'});
+    }
+    else {
+        warn "Unknown fit type $fit->{type}\n";
+        return sprintf('%s(%g,%g)', $fit->{'type'}, $fit->{'coef0'}, $fit->{'coef1'});
+    }
+}
+
+######################################################################
+sub formatRsq {
+    my ($fit) = @_;
+    return '???' unless defined($fit);
+    return '???' unless defined($fit->{'rsq'});
+    my $color;
+    if ($fit->{'rsq'} >= 0.9) { $color = 'green'; }
+    elsif ($fit->{'rsq'} >= 0.8) { $color = 'orange'; }
+    elsif ($fit->{'rsq'} >= 0.7) { $color = 'pink'; }
+    else { $color = 'red'; }
+    return sprintf('<font color="%s">%.3g</font>', $color, $fit->{'rsq'});
+}
+
+######################################################################
+sub formatMre {
+    my ($mre) = @_;
+    my $color;
+    if ($mre < 0.9999999) { warn "bad mre '$mre'"; return "???"; }
+    elsif ($mre < 1.10) { $mre = 1.00 if $mre < 1.00001; $color = 'green'; }
+    elsif ($mre < 1.20) { $color = 'orange'; }
+    elsif ($mre < 1.30) { $color = 'pink'; }
+    else { $color = 'red'; }
+    return sprintf('<font color="%s">%.4g%%</font>', $color, ($mre-1.0)*100.0 );
+}
+
+######################################################################
+sub formatCorr {
+    my ($corr) = @_;
+    my $color;
+    if (abs($corr) >= 0.5) { $color = 'green'; }
+    elsif (abs($corr) >= 0.3) { $color = 'yellow green'; }
+    elsif (abs($corr) >= 0.1) { $color = 'yellow'; } 
+    elsif (abs($corr) >= 0.05) { $color = 'orange'; }
+    else { $color = 'grey'; }
+    return sprintf('<font color="%s">%.3g</font>', $color, $corr);
+}
+
+######################################################################
+sub formatCode {
+    my ($code) = @_;
+    $code = textToEscapedHtml($code);
+    $code =~ s,\t,        ,g;
+    $code =~ s{^( +)} {sprintf('<font color="white">%s</font>', 'O' x length($1))}e;
+    $code =~ s, +,&nbsp;,g;
+    $code =~ s,^<font&nbsp;color,<font color,;
+    return $code;
+}
+
+######################################################################
+sub clusterLink {
+    my ($fit) = @_;
+    return '' unless defined($fit->{'cluster'});
+    return ahref("cluster$fit->{'cluster'}.html", 'C[' . $fit->{'cluster'} . ']');
+}
+
+######################################################################
+sub outputAnnotatedSourceFile {
+    my ($loc2fit, $srcLines, $srcFile, $outfile) = @_;
+    open(ASF, '>', $outfile) or die "$outfile: $!";
+    print ASF "<html><head><title>$srcFile</title></head><body>\n";
+    print ASF "<table>\n";
+    for (my $i=1; $i<=$#{$srcLines}; ++$i) {
+        my $key = "$srcFile/$i";
+        if (defined($loc2fit->{$key})) {
+            # we have fit data for this location
+            print ASF trow( td(clusterLink($loc2fit->{$key}))
+                            . td(ahref("$i/index.html", formatFitFunctionHtml($loc2fit->{$key})))
+                            . td(formatRsq($loc2fit->{$key}))
+                            . td(qq{<a name="$i"></a>$i})
+                            . td(formatCode($srcLines->[$i]))
+                            );            
+        } else {
+            # no fit data
+            print ASF trow( td()
+                            . td()
+                            . td()
+                            . td(qq{<a name="$i"></a>$i})
+                            . td(formatCode($srcLines->[$i]))
+                            );
+        }
+        my $block=0;
+        while (1) {
+            my $lineblock = "$i.$block";
+            my $loc = "$srcFile/$lineblock";
+            last unless defined($loc2fit->{$loc});
+	    unless ( defined($loc2fit{$key}->{'cluster'}) 
+		     && defined($loc2fit->{$loc}->{'cluster'})
+		     && $loc2fit{$key}->{'cluster'} == $loc2fit->{$loc}->{'cluster'} ) {
+		print ASF trow( td(clusterLink($loc2fit->{$loc}))
+				. td(ahref("$lineblock/index.html", formatFitFunctionHtml($loc2fit->{$loc})))
+				. td(formatRsq($loc2fit->{$loc}))
+				. td(qq{<a name="$lineblock"></a>$lineblock})
+				. td()
+			      );        
+	    }    
+            $block++;
+        }
+    }
+    print ASF "\n</table>\n";
+    print ASF "</body></html>\n";
+    close(ASF) or die "$outfile: $!";
+}
+
+
+######################################################################
+sub summaryLine {
+    my ($fit, @rest) = @_;
+    return trow(td('??')) unless defined($fit->{'bb'});
+    return trow(td('??')) unless defined($fit->{'file'});
+    my $file = $fit->{'file'};
+    my $bb = $fit->{'bb'};
+    my $fileurl = urlEncode($file);
+    my $bburl = urlEncode($fit->{'bb'});
+    return ( trow( 
+		 td(demangleFilename($file), "align=right")
+		 . td(ahref("$fileurl/index.html\#$bburl", $bb), "align=right")
+		 . td()
+		 . td(ahref("$fileurl/$bburl/index.html", formatFitFunctionHtml($fit)), "align=right")
+		 . td(formatRsq($fit))
+		 . join(' ', map { td($_) } @rest)
+		 . ( defined($clusterFile) ? td(clusterLink($fit)) : '' )
+                   ) );
+
+}
+
+
+######################################################################
+# give a fit structure a number based on how asymptotically bad it is
+# higher is worse
+sub scoreFitRateOfGrowth {
+    my ($fit) = @_;
+    return 1e10 unless defined($fit->{'type'});
+    return 1e10 unless defined($fit->{'coef0'});
+    return 1e10 unless defined($fit->{'coef1'});
+    my $type = $fit->{'type'};
+    my $coef0 = $fit->{'coef0'};
+    my $coef1 = $fit->{'coef1'};
+
+    # decreasing
+    return -1 if (0 > $coef1);
+
+    # zero
+    return 0 if ('linear' eq $type && 0 == $coef0 && 0 == $coef1);
+    return 0 if ('powerlaw' eq $type && 0 == $coef0);
+    return 0 if ('log' eq $type && 0 == $coef0 && 0 == $coef1);
+    return 0 if ('exp' eq $type && 0 == $coef0);
+
+    # non-zero constant
+    return 1 if ('linear' eq $type && 0 == $coef1);
+    return 1 if ('powerlaw' eq $type && 0 == $coef1);
+    return 1 if ('log' eq $type && 0 == $coef1);
+    return 1 if ('exp' eq $type && 0 == $coef1);
+
+    # logarithmic
+    return 20 if ('log' eq $type);
+
+    # sub-linear power law
+    return 300 if ('powerlaw' eq $type && 1.0 > $coef1);
+
+    # linear 
+    return 4000 if ('powerlaw' eq $type && abs($coef1 - 1.0) < 0.001);
+    return 4001 if ('linear' eq $type);
+
+    # super-linear power law
+    return 50000 if ('powerlaw' eq $type && $coef1 > 1.0) ;
+
+    # exponential
+    return 600000 if ('exp' eq $type);
+
+    # uh-oh
+    die "Unknown fit type:$type a:$coef0 b:$coef1";
+}
+
+######################################################################
+sub compareFitLocs {
+    my ($aa, $bb) = @_;
+    return ( !defined($aa) ? +1 : 0 )
+	|| ( !defined($bb) ? -1 : 0 )
+	|| (uc($aa->{'file'}) cmp uc($bb->{'file'}))
+        || ($aa->{'line'} <=> $bb->{'line'}) 
+        || ( !defined($bb->{'block'}) ? +1 : 0 )
+        || ( !defined($aa->{'block'}) ? -1 : 0 )
+        || ( '' eq $bb->{'block'} ? +1 : 0 )
+        || ( '' eq $aa->{'block'} ? -1 : 0 )
+        || ( ($aa->{'block'} =~ m/^[\d\.\-]+$/ && $bb->{'block'} =~ m/^[\d\.\-]+$/) 
+             ? ($aa->{'block'} <=> $bb->{'block'})
+             : ($aa->{'block'} cmp $bb->{'block'}) );
+}
+
+######################################################################
+sub outputOverallSummary {
+    my ($loc2fitDEBUG, $totalFit, $srcfiles, $views, $summaryFile) = @_;
+    my $tableStart = "\n<p><table cellpadding=3 cellspacing=0 border=1>";
+    my $tableEnd = "\n</table></p>";
+    open(SUM, '>', $summaryFile) or die "$summaryFile: $!";
+    print SUM "<html>\n<head><title>$title</title></head>\n<body>\n";
+    #print SUM ahref('clusters.html', "Cluster List");
+    foreach my $view (@$views) {
+        if ('filelist' eq $view) {
+            print SUM "\n<h2>List of Source Files</h2>";
+            print SUM $tableStart;
+            print SUM trow(th("File"));
+            foreach my $file (sort {uc(demangleFilename($a)) cmp uc(demangleFilename($b))} (@$srcfiles) ) {
+                next if ('total' eq $file);
+                print SUM trow(td(ahref( urlEncode($file) . "/index.html", demangleFilename($file) )));
+            }
+            print SUM $tableEnd;
+        }
+
+        elsif ($view =~ m/^count(.*)/i) {
+            my $rest = $1;
+            my $topn = 20;
+            if ($rest =~ m/top(\d+)/i)  { $topn = $1; }
+            my @locs = sort { ($loc2fitDEBUG->{$b}->{'sumLinY'} <=> $loc2fitDEBUG->{$a}->{'sumLinY'})
+                                  || compareFitLocs($loc2fitDEBUG->{$a}, $loc2fitDEBUG->{$b})
+                                  } (keys(%$loc2fitDEBUG));
+                printf SUM ("\n<h2> Source Lines with Models, Ranked by total observed executions</h2>\n");
+                print SUM $tableStart;
+                print SUM trow( th("File", "align=right") 
+                                . th("Line") 
+                                . th()
+                                . th("Model", "align=right") 
+                                . th("Goodness (R^2)") 
+                                . th("xformed MRE")
+                                . th("linspace MRE")
+                                . th("Observed Number of Executions")
+                                . ( defined($clusterFile) ? th("Cluster") : '' )
+                                );
+                foreach my $loc (@locs) {
+                    last if ($topn-- <= 0);
+                    print SUM summaryLine( $loc2fitDEBUG->{$loc}, 
+                                           , formatMre($loc2fitDEBUG->{$loc}->{'mre'})
+                                           , formatMre($loc2fitDEBUG->{$loc}->{'umre'})
+                                           , sprintf('%.3g', $loc2fitDEBUG->{$loc}->{'sumLinY'})
+                                         );
+                }
+                print SUM $tableEnd;
+        }
+
+        elsif ($view =~ m/^badmre(.*)/i) {
+            my $rest = $1;
+            my $topn = 20;
+            if ($rest =~ m/top(\d+)/i)  { $topn = $1; }
+            my %fitRank;
+            foreach my $key (keys(%$loc2fitDEBUG)) {
+                $fitRank{$key} = ($loc2fitDEBUG->{$key}->{'mre'} ** 10) * $loc2fitDEBUG->{$key}->{'sumLinY'};
+            }
+            my @locs = sort { ($fitRank{$b} <=> $fitRank{$a})
+                                  || compareFitLocs($loc2fitDEBUG->{$a}, $loc2fitDEBUG->{$b})
+                                  } (keys(%$loc2fitDEBUG));
+                printf SUM ("\n<h2>Lousy MRE (ranked by linmre*sy)</h2>\n");
+                print SUM $tableStart;
+                print SUM trow( th("File", "align=right") 
+                                . th("Line") 
+                                . th()
+                                . th("Model", "align=right") 
+                                . th("Goodness (R^2)") 
+                                . th("xformed MRE")
+                                . th("linspace MRE")
+                                . th("Observed Number of Executions")
+                                . ( defined($clusterFile) ? th("Cluster") : '' )
+                                );
+                foreach my $loc (@locs) {
+                    last if ($topn-- <= 0);
+                    print SUM summaryLine( $loc2fitDEBUG->{$loc}, 
+                                           , formatMre($loc2fitDEBUG->{$loc}->{'mre'})
+                                           , formatMre($loc2fitDEBUG->{$loc}->{'umre'})
+                                           , sprintf('%.3g', $loc2fitDEBUG->{$loc}->{'sumLinY'})
+                                         );
+                }
+                print SUM $tableEnd;
+        }
+
+
+        elsif ($view =~ m/^badrsq(.*)/i) {
+            my $rest = $1;
+            my $topn = 20;
+            if ($rest =~ m/top(\d+)/i)  { $topn = $1; }
+            my %fitRank;
+            foreach my $key (keys(%$loc2fitDEBUG)) {
+                my $d = ($loc2fitDEBUG->{$key}->{'rsq'} > 0.000001) 
+                    ? $loc2fitDEBUG->{$key}->{'rsq'} ** 10
+                    : 0.000001;
+                $fitRank{$key} = $loc2fitDEBUG->{$key}->{'sumLinY'} / $d;
+            }                
+            my @locs = sort { ($fitRank{$b} <=> $fitRank{$a})
+                                  || compareFitLocs($loc2fitDEBUG->{$a}, $loc2fitDEBUG->{$b})
+                                  } (keys(%$loc2fitDEBUG));
+                printf SUM ("\n<h2> Lousy R^2 (ranked by sy/R^2)</h2>\n");
+                print SUM $tableStart;
+                print SUM trow( th("File", "align=right") 
+                                . th("Line") 
+                                . th()
+                                . th("Model", "align=right") 
+                                . th("Goodness (R^2)") 
+                                . th("xformed MRE")
+                                . th("linspace MRE")
+                                . th("Observed Number of Executions")
+                                . ( defined($clusterFile) ? th("Cluster") : '' )
+                                );
+                foreach my $loc (@locs) {
+                    last if ($topn-- <= 0);
+                    print SUM summaryLine( $loc2fitDEBUG->{$loc}, 
+                                           , formatMre($loc2fitDEBUG->{$loc}->{'mre'})
+                                           , formatMre($loc2fitDEBUG->{$loc}->{'umre'})
+                                           , sprintf('%.3g', $loc2fitDEBUG->{$loc}->{'sumLinY'})
+                                         );
+                }
+                print SUM $tableEnd;
+        }
+
+
+        elsif ($view =~ m/^exp(.*)$/i) {
+            my $rest = $1;
+            my $topn = 20;
+            if ($rest =~ m/top(\d+)/i)  { $topn = $1; }
+            my %fitRank;
+            foreach my $key (keys(%$loc2fitDEBUG)) {
+                $fitRank{$key} = scoreFitRateOfGrowth($loc2fitDEBUG->{$key});
+            }
+            my @locs = sort {   ($fitRank{$b}    <=>  $fitRank{$a})
+                                 || ($loc2fitDEBUG->{$b}->{'coef1'}  <=>  $loc2fitDEBUG->{$a}->{'coef1'}) 
+                                 || ($loc2fitDEBUG->{$b}->{'coef0'}  <=>  $loc2fitDEBUG->{$a}->{'coef0'})
+                                 || compareFitLocs($loc2fitDEBUG->{$a}, $loc2fitDEBUG->{$b})
+                             }  (keys(%$loc2fitDEBUG));
+            print SUM "\n<h2>Source Lines with Models, Ranked by exponent</h2>";
+            print SUM $tableStart;
+            print SUM trow( th("File", "align=right") 
+                            . th("Line") 
+                            . th()
+                            . th("Model", "align=right") 
+                            . th("Goodness (R^2)") 
+                            . th("xformed MRE")
+                            . th("linspace MRE")
+                            . th("Observed Number of Executions")
+                            . ( defined($clusterFile) ? th("Cluster") : '' )
+                            );
+            foreach my $loc (@locs) {
+                last if ($topn-- <= 0);
+                print SUM summaryLine( $loc2fitDEBUG->{$loc}
+                                       , formatMre($loc2fitDEBUG->{$loc}->{'mre'})
+                                       , formatMre($loc2fitDEBUG->{$loc}->{'umre'})
+                                       , sprintf('%.3g', $loc2fitDEBUG->{$loc}->{'sumLinY'})
+                                     );
+            }
+            print SUM $tableEnd;
+        } 
+
+        elsif ($view =~ m/^evalAt=([0-9eE+-\.]+)(,.*)?$/i) {
+            my $n = $1;
+            my $rest = $2;
+            my $topn = 20;
+            if ($rest =~ m/top(\d+)/i)  { $topn = $1; }
+            $n = strToFloat($n);
+            if (!defined($n)) {
+                warn "evalAt=number must specify a number like evalAt=100 or evalAt=+1e5\n";
+            } else {
+                my %valueAt;
+                my $total = 0.0;
+                foreach my $loc (keys(%$loc2fitDEBUG)) {
+                    $valueAt{$loc} = evalFitAt($loc2fitDEBUG->{$loc}, $n);
+                    $total += $valueAt{$loc};
+                }
+                my @locs = sort { ($valueAt{$b} <=> $valueAt{$a})
+                                      || compareFitLocs($loc2fitDEBUG->{$a}, $loc2fitDEBUG->{$b})
+                                  } (keys(%$loc2fitDEBUG));
+                printf SUM ("\n<h2>input size = %g</h2> Source Lines with Models, Ranked by predicted number of executions this input size", $n);
+                print SUM $tableStart;
+                print SUM trow( th("File", "align=right") 
+                                . th("Line") 
+                                . th()
+                                . th("Model", "align=right") 
+                                . th("Goodness (R^2)") 
+                                . th("xformed MRE")
+                                . th("linspace MRE")
+                                . th("Predicted Number of Executions")
+                                . ( defined($clusterFile) ? th("Cluster") : '' )
+                                );
+                foreach my $loc (@locs) {
+                    last if ($topn-- <= 0);
+                    print SUM summaryLine( $loc2fitDEBUG->{$loc}, 
+                                           , formatMre($loc2fitDEBUG->{$loc}->{'mre'})
+                                           , formatMre($loc2fitDEBUG->{$loc}->{'umre'})
+                                           , sprintf('%.3g', $valueAt{$loc})
+                                         );
+                }
+                print SUM $tableEnd;            
+            }
+        }
+
+        elsif ('total' eq $view) {
+            print SUM "\n<h2>Total</h2> (number of basic blocks executed as a function of input size)";
+            print SUM "\n<p>";
+            print SUM ahref("total/index.html", formatFitFunctionHtml($totalFit));
+            print SUM "(R^2=" . formatRsq($totalFit) . ") </p>";
+        }
+
+        else {
+            warn "Unsupported view type '$view' ignored.\n";
+        }
+    }
+
+    print SUM "\n\n</body>\n</html>\n";
+    close SUM or die "$summaryFile: $!";
+}

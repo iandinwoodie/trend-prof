@@ -1,0 +1,467 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+
+<head>
+   <meta http-equiv="content-type" content="text/html; charset=iso-8859-1">
+
+   <style type="text/css">
+   BODY {
+	background-color : #FFFFFF;
+        }
+   </style>
+
+   <title>Trend Profiler</title>
+</head>
+
+<body>
+
+<h1>Trend Profiler</h1>
+
+<!-- <p><font color="red"><b>Please do not run trend-prof at this time.  As it is currently constructed,
+it will stress test your file system and disk hardware.  We are investigating the
+hypothesis that if your system "fails" this test, your file system may become
+corrupted and/or your disk may fail.</b></font></p>
+-->
+
+<p><b>Maintainer:</b> <a href="http://www.cs.berkeley.edu/~sfg/">Simon Goldsmith</a>
+<br><b>Maintainer:</b> <a href="http://www.cs.berkeley.edu/~dsw/">Daniel S. Wilkerson</a>
+</p>
+
+<h3>Summary</h3>
+
+<p><tt>trend-prof</tt> aims at finding performance surprises (super-linearities) in C / C++
+code based on trends in the runs of the program on small to medium inputs.  That
+is, we predict which parts of the code will not scale well to larger inputs.  For
+each basic block (more or less a line of source code), <tt>trend-prof</tt> constructs a
+model that predicts how many times that basic block is executed as a function of
+input size.
+</p>
+
+<p>The current <tt>trend-prof</tt> tool works on C / C++ compiled with <tt>gcc</tt> (see
+below).  With some hacking, it can be made to work on other programs.
+
+
+<h3>Directory contents</h3>
+
+<p>Other documents in this directory that you will want to consult.
+<ul>
+<li> The <a href="manifest.html">Manifest of Trend Profiler</a> lists and describes the
+files in the project.
+</li>
+<li> The <a href="schema.html">Schema of a Trend Profile</a> documents
+the structure of a Trend Profile (a "profdir") including all the files
+that <tt>trend-prof</tt> creates.
+</li>
+</ul>
+
+<h3>Releases</h3>
+
+<ul>
+<li><a
+href="http://trend-prof.tigris.org/files/documents/3534/29071/trend-prof-2006.01.17.tar.gz">trend-prof-2006.01.17.tar.gz</a> &nbsp; md5:
+<code>
+f56b6b2a810081dd0834b4d1c1b02282
+</code>
+<p>The Happy 300th birthday Ben Franklin release!
+</p></li>
+</ul>
+
+
+<h2>Overview</h2>
+
+<p><b>Inputs:</b>
+<ul>
+<li> Your C / C++ program compiled with <tt>gcc -ftest-coverage -fprofile-arcs</tt>
+</li>
+<li> Several workloads for your program:  Each workload should be annotated with a
+"size". 
+</li>
+</ul>
+
+<p><b>Outputs:</b>
+<ul>
+
+<li> For each basic block the following are output.
+
+<ul>
+
+<li> a model that predicts number of executions as a function of input size.
+There are two kinds of models: a linear model like <tt>count = 10 + 20n</tt> or a
+power law model like <tt>count = 4 * n^1.2</tt>.  </li>
+
+<li> a plot with input size on the horizontal axis and number of executions on the
+vertical axis.  The plot shows the observed number of executions of the basic
+block and the number of executions the model predicts.  </li>
+
+</ul></li>
+
+<li> For each source file: a copy of that source file where each line is annotated
+with the model for that line.
+
+<li> A summary of all the models for all the basic blocks, ranked from most
+executions to least (configurable).
+
+</ul>
+
+<p> The rankings are intended to suggest the places in your code that will have
+the worst performance as workload sizes increase.  <tt>trend-prof</tt> is different
+from traditional profilers in that it attempts to predict what will happen at
+workload sizes larger than were actually measured instead of merely showing what
+did happen on sizes that were actually measured.
+</p>
+
+<p>  It is important to consider carefully the results that <tt>trend-prof</tt> reports.
+It shows graphs of observed execution counts for a basic block (y axis) versus
+user reported workload size (x axis) and the line of best fit for those points.  To
+the extent that the workload size is a good predictor of the execution count, the
+points will be tightly clustered and the line will fit well.  Similarly, the
+models <tt>trend-prof</tt> constructs will be representative of the chosen workloads;
+the model will be a good predictor of a new workload only to the extent that the
+new workload is like the ones on which <tt>trend-prof</tt> was initially run. 
+</p>
+
+<p>
+The bubble sort example in <tt>examples/bubble_sort</tt> shows a
+subtly incorrect use of <tt>trend-prof</tt>; in particular, notice
+that <tt>trend-prof</tt> predicts that line 19 will be executed (input
+size)^1.84 times even though bubble sort is quadratic in the size of
+its input.  If you understand why, you'll get more out of
+<tt>trend-prof</tt> (hint: what's the input size?).
+</p>
+
+<p>
+<tt>trend-prof</tt> shows its work; it is easy to look at intermediate
+computations.  For instance, the maintainers found an off-by-one bug in the bubble
+sort example by looking at the exact number of times line 19 was executed for
+various workloads.  See the <a href="schema.html">Schema of a Trend Profile</a>
+for details on <tt>trend-prof</tt>'s intermediate files.
+</p>
+
+<p>This work was supported by professor <a
+href="http://theory.stanford.edu/~aiken/">Alex Aiken</a> and was
+done at UC Berkeley.
+</p>
+
+<h2>Installing</h2>
+
+<p> <ol>
+
+<li> Make sure all of the following programs are installed.
+<ul>
+
+<li> <tt>gcc</tt> and <tt>gcov</tt>
+</li>
+
+<li> <tt>perl</tt>
+</li>
+
+<li> the perl module <tt>Archive::Zip</tt>; Running <tt>cpan -i
+Archive::Zip</tt> as root will install this module if cpan is set up.
+</li>
+
+<li> <tt>gnuplot</tt>
+</li>
+
+</ul>
+<pre></pre></li>
+
+
+<li> Check out the repository into, say, "~/trend-prof". 
+<pre></pre></li>
+
+<li> Edit Config.mk so that BIN points at where you put <tt>trend-prof</tt>.  For
+example 
+<pre>
+BIN := /home/simon/trend-prof
+</pre>
+Also, delete the line that looks like:
+<pre>
+$(error You must set the BIN variable in Config.mk.  Please see the documentation)
+</pre></li>
+
+<li> If necessary, edit Config.mk so that it can find perl, time, gnuplot, and
+gcov on your system.  The version of gcov pointed to in Config.mk must be the same
+as the version of <tt>gcc</tt> with which you compiled your program.  Any difference will
+result in an obscure error message during the run of <tt>trend-prof</tt>.  </li>
+
+<li> run "make test".  This target runs <tt>trend-prof</tt> on the examples in the
+<tt>examples/quick_sort</tt> and <tt>examples/bubble_sort</tt> profdirs.  You can
+clean up all the stuff "make test" generates with "make test-clean".  </li>
+
+</ol>
+
+<h2>An example use of <tt>trend-prof</tt></h2>
+
+<p> We'll illustrate the use of <tt>trend-prof</tt> with an example.
+This example is included in the repository under the
+"examples/quick_sort" directory.  Here we detail how that example was
+written.  You can run <tt>trend-prof</tt> on it by running "make
+test".  <b>Note:</b> Most of the links below this point do not work
+when this page is viewed as http://trend-prof.tigris.org; however,
+they should work if you're viewing a local copy of this document that
+you got as part of a <tt>trend-prof</tt> check out.  Some of the links
+won't point to anything until you've built the examples/quick_sort by
+running <tt>make test</tt>. 
+</p>
+
+<p>
+Suppose we have the
+following program which generates a random array of integers and calls qsort() on
+them <a href="../examples/quick_sort/0_config/src/main.c">main.c</a> 
+<a href="../examples/quick_sort/0_config/src/compare.c">compare.c</a> 
+<a href="../examples/quick_sort/0_config/src/compare.h">compare.h</a> 
+<a href="../examples/quick_sort/0_config/src/Makefile">Makefile</a>.
+</p>
+
+<h3>Setup your program</h3>
+
+<ul>
+
+<li> Install <tt>trend-prof</tt> (see above).
+<pre></pre>
+</li>
+
+<li> Create and initialize a directory, in this example we'll use <tt>$HOME/quick_sort</tt> to store
+profiling information.  Note that <tt>profdir/</tt> is a
+parameterized make target and the string following the <tt>/</tt> is
+the path to the directory.
+<pre>
+$ cd $HOME/trend-prof
+$ make profdir/$HOME/quick_sort
+</pre>
+
+Note that your directory <tt>$HOME/quick_sort</tt> is now populated with a
+skeleton of a Trend Profile directory; for example it now has a
+"0_config" subdirectory.
+
+We suggest that you do not use <tt>make profdir/~/quick_sort</tt> as some systems
+won't do what you want.  Specifying an absolute path is always safe <tt>make
+profdir//home/simon/quick_sort</tt>.  We suggest also that you put your profdir
+and your compiled code on a local disk -- not a networked file system.  During a
+profiling session, <tt>trend-prof</tt> does a large amount (approximately number
+of workloads times size of your program) of disk i/o and writing
+across a network is likely to slow things down a great deal.
+<pre></pre></li>
+
+<li> Make a directory (or symlink) called "$HOME/quick_sort/0_config/src" that contains your program
+source.  This directory may contain an arbitrarily deep directory hierarchy; <tt>trend-prof</tt>
+uses <tt>find</tt> to locate the files it needs.
+<pre>
+$ cd $HOME/quick_sort/0_config
+$ mkdir src
+(copy your source code there)
+</pre></li>
+
+<li> Compile your code with <tt>gcc</tt> (or <tt>g++</tt>) as follows.  You can
+use <tt>trend-prof</tt> without compiling every file in this way, but you will get
+information and models only for the files you compile with these flags.  See "man
+gcc" and "man gcov" for more information on these flags.
+
+<ul> 
+
+<li> <b>Compiling:</b> Compile your source files with <tt>gcc -fprofile-arcs -ftest-coverage</tt>.
+<pre>
+$ cd $HOME/quick_sort/0_config/src
+$ gcc -fprofile-arcs -ftest-coverage -g -O3 -c main.c -o main.o
+$ gcc -fprofile-arcs -ftest-coverage -g -O3 -c compare.c -o compare.o
+</pre>
+</li>
+
+<li> <b>Linking:</b> If you use <tt>gcc</tt> or <tt>g++</tt> to link, pass
+<tt>-fprofile-arcs -ftest-coverage</tt>.  If you call <tt>ld</tt> directly,
+you're on your own, but passing <tt>-lgcov</tt> is a good start.
+
+<pre>
+$ gcc -fprofile-arcs -ftest-coverage -g -O3 main.o compare.o -o main
+</pre>
+
+Notice that compiling as above creates 
+<tt>main.gcno</tt> and <tt>compare.gcno</tt> and that running <tt>main</tt> (created as above) creates
+<tt>main.gcda</tt> and <tt>compare.gcda</tt>.  We refer to these files as "gcov
+metadata".  <tt>trend-prof</tt> invokes <tt>gcov</tt> to gather information about program runs.
+<pre></pre></li>
+
+<li> <b>Constructing Static Libraries:</b> You don't have to do anything special when constructing static
+libraries. <pre></pre></li>
+
+<li> <b>Constructing Dynamic Libraries:</b> As is the case for linking, with <tt>gcc</tt> or
+<tt>g++</tt>, pass <tt>-fprofile-arcs -ftest-coverage</tt>.  If you call <tt>ld</tt>
+directly, you're on your own, but passing <tt>-lgcov</tt> is a good
+start.<pre></pre></li>
+
+</ul>
+Versions of <tt>gcc</tt> that are known to work with <tt>trend-prof</tt> include
+3.4, 4.0.
+Versions of <tt>gcc</tt> that are known to <i>not</i> work with <tt>trend-prof</tt> include
+2.95, 3.3.
+<pre></pre></li>
+
+<li> Make a directory (or symlink) called "$HOME/quick_sort/0_config/obj" that
+contains the object files for your program.  In particular,
+<tt>trend-prof</tt> will look for gcov metadata (for example,
+<tt>main.gcda</tt>) here.  "obj" can just be a symlink to "src" if
+you're not doing anything fancy with your build process and your .o
+files are right next to your .c/.cc files.
+<pre>
+$ cd $HOME/quick_sort/0_config
+$ ln -s src obj
+</pre></li>
+</ul>
+
+<h3>Setup your workloads</h3>
+
+<ul>
+
+<li> Create a file called "0_config/workloads" that lists all the
+workloads on which you want to run your program and their sizes.
+
+<p>The script <tt>workloads_from_dir</tt> will do this for you if your
+workloads are just simple input files in a directory and what you are
+thinking of as the "size" of the workload (the number on the X-axis on
+the plots) is just the concrete size in bytes of the file.  Please see
+examples/bubble_sort/0_config/Makefile for an example use of this
+technique.
+</p>
+
+<p>The file looks something like the following.
+<pre>
+workload:
+  size=256
+  name=workload1
+
+#you need a blank line to separate workloads
+workload:
+  size=512
+  # Workload names may not start with whitespace nor contain newlines.
+  # Other than that they can contain most keyboard characters.
+  # It is up to your run_workload script to make sense of the names.
+  name=workload2,stuff=blah still part of the workload name
+</pre>
+See the <a
+href="../examples/quick_sort/0_config/workloads">workloads</a> file of
+examples/quick_sort for another example.<pre></pre></li>
+
+<li> Create a script called "0_config/run_workload" that takes as
+input a workload name (from the "0_config/workloads" file) and runs
+that workload.  The script will be run from the profdir
+("$HOME/quick_sort/" in this case).  The names of the workloads don't
+have to resemble anything in particular; <tt>trend-prof</tt> just
+passes them to your "run_workload" script.  Your script could be as
+simple as the following.  Remember to <tt>chmod +x run_workload</tt>.
+Also, remember to 'exec' your program from the script if you can to
+avoid extra process creation.
+<pre>
+#!/bin/sh
+exec 0_config/src/your_program 0_config/your_inputs/$1
+</pre>
+See the <a
+href="../examples/quick_sort/0_config/run_workload">run_workload</a>
+script of examples/quick_sort for a more involved example.
+
+<pre></pre></li>
+
+<li> Test your script.  Doing so will create a .gdca file which records
+the results of profiling.  You can clean out the effect of profiling
+the runs and restart by deleting all .gcda files.  You don't need to
+be concerned that you are adding a data point to your results because
+<tt>trend-prof</tt> will remove all the .gcda files when it starts its
+profiling run of your workloads.
+
+<pre>
+$ cd $HOME/quick_sort
+$ 0_config/run_workload size=64,seed=1234
+</pre></li>
+
+<li> Your <a href="../examples/quick_sort/">directory structure</a> should look like this:
+<pre>
+$ cd $HOME/quick_sort
+$ find
+.
+./Makefile
+./0_config
+./0_config/src
+./0_config/src/main
+./0_config/src/Makefile
+./0_config/src/main.c
+./0_config/src/main.gcno
+./0_config/src/compare.c
+./0_config/src/compare.h
+./0_config/src/main.o
+./0_config/src/compare.gcno
+./0_config/src/compare.o
+./0_config/run_workload
+./0_config/workloads
+</pre>
+If you've run <tt>main</tt>, the following files will also be present.
+<pre>
+./0_config/src/main.gcda
+./0_config/src/compare.gcda
+</pre></li>
+</ul>
+
+<h3>Run Trend Profiler</h3>
+
+<ul>
+
+<li> Run <tt>trend-prof</tt>
+<pre>
+$ cd $HOME/quick_sort
+$ make
+</pre></li>
+
+<li> If <tt>trend-prof</tt> can't match up all the gcov metadata with source code,
+it will complain and halt the run.  The problematic files will be annotated as
+such in <a href="../examples/quick_sort/0_config/source_files">"0_config/source_files"</a>.
+Your options are as follows.  
+<ul>
+
+<li> Keep going anyway.  Just type "make" again and things will resume.  In this
+case some of the data <tt>trend-prof</tt> gathers won't be matched up to the
+corresponding source code.  The data and models will be reported with the correct
+source files and line numbers, but <tt>trend-prof</tt> will not show the source code
+for those files.</li>
+
+<li> (recommended) Edit the "0_config/source_files" file so that gcov metadata is
+matched up with the correct source file.  The source_files file looks as follows.</li>
+</ul>
+<pre>
+SourceFile:
+   #how you want the name to show up on results pages
+   displayName=main.c
+   #the gcov metadata (.gcno) file;  the path is relative to the profdir ($HOME/quick_sort/ in the example)
+   gcno=0_config/obj/main.gcno
+   #the source file; the path is relative to the profdir ($HOME/quick_sort/ in the example)
+   source=0_config/src/main.c
+
+# you need a blank line between entries; comments don't count
+SourceFile:
+   displayName=compare.c
+   gcno=0_config/obj/compare.gcno
+   source=0_config/src/./compare.c
+</pre></li>
+
+
+<li> Point your web browser at the <a
+href="../examples/quick_sort/4_view/index.html">4_view/index.html</a>
+file.</li>
+
+</ul>
+
+<h2>Acknowledgements</h2>
+
+<p>Thanks to <a href="http://www.cs.berkeley.edu/~smcpeak/">Scott McPeak</a> for
+pointing us towards gcov.</p>
+
+<p>Thanks to Johnathon Jamison for trying the tool and pointing out several
+shortcomings in the documentation.</p>
+
+<p>Thanks to Armando Solar-Lezama for trying the tool.</p>
+
+
+
+<!-- bar at the bottom -->
+<h2>&nbsp;</h2>
+
+</body>
+</html>

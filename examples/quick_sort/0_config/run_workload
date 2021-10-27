@@ -1,0 +1,19 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+die unless 0 == $#ARGV;
+my ($workloadName) = @ARGV;
+my $prog = "0_config/src/main";
+
+if ($workloadName =~ m/^size=(\d+),lowToHigh$/i) {
+    exec("$prog --size=$1 --lowtohigh");
+} elsif ($workloadName =~ m/^size=(\d+),highToLow$/i) {
+    exec("$prog --size=$1 --hightolow");
+} elsif ($workloadName =~ m/^size=(\d+),seed=(\d+)$/i) {
+    exec("$prog --size=$1 --randomOrderWithSeed=$2");
+} else {
+    die "Unkown options";
+}
+
+die "Exec failed";

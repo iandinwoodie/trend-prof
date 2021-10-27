@@ -1,0 +1,33 @@
+#!/usr/bin/perl -w
+
+#
+# see License.txt for copyright and terms of use
+#
+
+# Creates a workloads file based on the files in a directory filtered
+# by a regex command-line argument.  See the documentation or
+# schema.html for details on workloads files.
+
+use strict;
+
+# Takes a directory and optional regex as arguments.
+# Prints a workloads file that contains one workload for each file in
+# the directory whose name matches the regex.
+# workload name= file's name, workload size= file's size
+
+die "Usage $0 directory [perl_regex]\n" unless 0 <= $#ARGV;
+my ($dir, $regex) = @ARGV;
+
+opendir(DIR, $dir) or die "ERROR opening $dir: $!";
+print "# a workloads file\n";
+while ( my $file = readdir(DIR) ) {
+    next if $file =~ m/^\./;    # skip files starting with '.'
+    next if ( defined($regex) && $file !~ m/$regex/x ); # honor the user's regex
+    my $size = -s "$dir/$file";
+    print "\nworkload:\n";
+    print "    size = $size\n";
+    print "    name = $file\n";
+}
+print "\n";
+closedir(DIR) or die "ERROR closing $dir: $!";
+exit(0);

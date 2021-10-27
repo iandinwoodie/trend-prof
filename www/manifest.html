@@ -1,0 +1,205 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+
+<head>
+   <meta http-equiv="content-type" content="text/html; charset=iso-8859-1">
+
+   <style type="text/css">
+   BODY {
+	background-color : #FFFFFF;
+        }
+   </style>
+
+   <title>Manifest of Trend Profiler</title>
+</head>
+
+<body>
+
+<h1>Manifest of Trend Profiler</h1>
+<h3>Directory contents</h3>
+
+<p>Other documents in this directory that you will want to consult.
+<ul>
+<li> The <a href="schema.html">Schema of a Trend Profile</a> documents
+the structure of a Trend Profile (a "profdir") including all the files
+that <tt>trend-prof</tt> creates.
+</li>
+<li> The <a href="index.html">Documentation for Trend Profiler</a>.
+</li>
+</ul>
+
+<h3>Documentation</h3>
+
+<ul>
+
+<li><b>0Readme</b>
+<p>Points the user to the real documentation.
+</p></li>
+
+<li><b>License.txt</b>
+<p>Explains the license and terms of use for this software.
+</p></li>
+
+<li><b>www/index.html</b>
+<p>The documentation.
+</p></li>
+
+<li><b>www/manifest.html</b>
+<p>Lists all the files in the project and explains what each one does.
+</p></li>
+
+<li><b>www/schema.html</b>
+<p>Documents the structure of a Trend Profile.
+</p></li>
+
+</ul>
+
+<h3>Makefiles</h3>
+
+<ul>
+
+<li><b>Makefile</b>
+<p>Sets up new Trend Profiles, profdirs, via "make
+profdir/your_path_here".  Runs a simple test via "make test".
+</p></li>
+
+<li><b>Config.mk</b>
+<p>Drives the data gathering and analysis.  Symlinked into new profdirs as
+"Makefile".  Contains paths to some programs that <tt>trend-prof</tt> needs.
+</p></li>
+
+<li><b>Driver.mk</b>
+<p>Included by <tt>Config.mk</tt> to drive the various <tt>trend-prof</tt>
+scripts.  You can think of this file as containing the bulk of the code in
+<tt>trend-prof</tt>'s <tt>main()</tt> function.
+</p></li>
+
+</ul>
+
+<h3>Processing stages</h3>
+
+<ul>
+
+<li><b>do_0_srcfind</b>
+<p>Step 0: Attempts to match gcov metadata in your obj directory to
+their corresponding source files.  After step 0 is the last place
+where user intervention may be required.
+</p></li>
+
+<li><b>do_1_rawgcov</b>
+<p>Step 1: Runs your workloads.  Saves gcov coverage data for each
+workload for each source file.
+</p></li>
+
+<li><b>do_2_linewise</b>
+<p>Step 2: Extracts data from the gcov coverage data and stores it in
+a more useful format.
+</p></li>
+
+<li><b>do_3_fit</b>
+<p>Step 3: Fits the data for each basic block to several models.
+</p></li>
+
+<li><b>do_4_view</b>
+<p>Step 4: Generates an html view of the results of profiling.
+</p></li>
+
+</ul>
+
+<h3>Helper scripts/libraries</h3>
+
+<ul>
+
+<li><b>run_server</b>
+<p>Runs a simple web server that allows on-demand generation of much of
+<tt>trend-prof</tt>'s output.  The initial run of <tt>trend-prof</tt> runs all of
+your workloads, fits the data to models, and generates a summary page.  When you
+view the summary page through this server, asking for subsequent pages will cause
+this script to generate them.
+</p></li>
+
+<li><b>workloads_from_dir</b>
+<p>Creates a workloads file based on the files in a directory
+filtered by a perl-style regular expression command-line argument.  See the documentation or
+<a href="schema.html">schema.html</a> for details on workloads files.
+</p></li>
+
+<li><b>workloads_from_wc</b>
+<p>A quick and dirty script that creates a workloads file based on the output of
+<tt>wc -l</tt>.
+</p></li>
+
+<li><b>trend_prof_common.pm</b>
+<p>Some library functions that the different steps share.
+</p></li>
+
+<li><b>clusters.pl</b>
+<p>Computes "clusters" of locations that exhibit similar execution counts.  This
+functionality is still under development.
+</p></li>
+
+<li><b>datamatrix.pl</b>
+<p>Dumps out execution counts in a matrix form suitable for consumption by such programs
+as R or matlab.  
+</p></li>
+
+
+<li><b>.debug</b>
+<p>If this file is present in the same directory as the perl scripts, then the
+scripts will be more verbose about reporting strange situations and more aggressive
+about failing with an error message whenever something suspicious happens.
+Without this file <tt>trend-prof</tt> just keeps going and generally
+pretends that the strange thing does not exist.
+</p></li>
+
+</ul>
+
+<h3>Examples</h3>
+
+<h4>examples/quick_sort</h4> <p>An example Trend Profile
+demonstrating <tt>trend-prof</tt> being used to profile quick sort.
+
+<ul>
+
+<li>Makefile
+<p>A symlink to Config.mk
+</p></li>
+
+<li>0_config/
+<p>See <a href="schema.html">schema.html</a> for details on these files.
+<ul>
+<li>workloads
+<li>run_workload
+<li>src
+<li>obj
+<p>A symlink to src
+</ul></li>
+
+<li>0_config/src/
+<p>Contains a Makefile and source for the quick_sort program.
+<ul>
+<li>Makefile
+<li>compare.c
+<li>compare.h
+<li>main.c
+</ul></li>
+
+</ul>
+
+<h4>examples/bubble_sort</h4>
+
+<p>An example use of <tt>trend-prof</tt> to profile bubble sort.  This
+example is subtly incorrect use of <tt>trend-prof</tt>; in particular,
+notice that <tt>trend-prof</tt> predicts that line 19 will be executed
+(input size)^1.84 times even though bubble sort is quadratic in the
+size of its input.  If you understand why, you'll get more out of
+<tt>trend-prof</tt> (hint: what's the input size?).
+</p>
+
+
+<!-- bar at the bottom -->
+<h2>&nbsp;</h2>
+
+</body>
+</html>

@@ -1,0 +1,317 @@
+#!/usr/bin/perl -w
+
+#
+# see License.txt for copyright and terms of use
+#
+
+# Step 1: Runs your workloads.  Saves gcov coverage data for each
+# workload for each source file.
+
+use strict;
+use Cwd;
+use File::Copy;
+use File::Find;
+use FindBin;
+use lib $FindBin::Bin;
+use trend_prof_common;
+my $debugMode = -f "$FindBin::Bin/.debug";
+use Archive::Zip qw( :ERROR_CODES :CONSTANTS );
+
+# create 
+#    $rawGcovDir/$workloadindex_$workloadname.data (format: location \t count \n)
+# for each $workload named in 
+#    $workloadsFile
+# by running
+#    $runWorkload $workload_name
+# then running 
+#    $gcovProgram on all the .gcda files mentioned in $sourcefileMap
+# and digesting $gcovProgram's output
+
+# command line
+die "Usage: $0  base_dir  rawgcov_dir  workloads_file  run_workload_script  sourcefile_map  source_dir  obj_dir  gcov_program\n" unless ($#ARGV >= 7);
+my ($basedir, $rawGcovDir, $workloadsFile, $runWorkload, $sourcefileMap, $srcDir, $objDir, $gcovProgram, $minIndex) = @ARGV;
+
+# required files and directories
+die "$basedir" unless (-d $basedir);
+chdir $basedir or die "chdir $basedir failed: $!";
+# dsw: was
+#   my $absBaseDir = `pwd`;
+my $absBaseDir = getcwd;
+chomp $absBaseDir;
+die unless (-d $absBaseDir);
+
+$workloadsFile = "$absBaseDir/$workloadsFile";
+die "ERROR: couldn't find '$workloadsFile'" unless (-r $workloadsFile);
+$runWorkload = "$absBaseDir/$runWorkload";
+die "ERROR: couldn't find '$runWorkload'" unless (-x $runWorkload);
+$sourcefileMap = "$absBaseDir/$sourcefileMap";
+die "ERROR: couldn't find '$sourcefileMap'" unless -r $sourcefileMap;
+my $absSrcDir = "$absBaseDir/$srcDir";
+die "ERROR: couldn't find '$absSrcDir'" unless (-d $absSrcDir);
+my $absObjDir = defined($objDir) && (-d $objDir) ? "$absBaseDir/$objDir" : $absSrcDir; 
+die "ERROR: couldn't find '$absObjDir'" unless (-d $absObjDir);
+
+# created directories
+$rawGcovDir = "$absBaseDir/$rawGcovDir";
+mkdir $rawGcovDir;
+die "ERROR: couldn't create '$rawGcovDir'" unless (-d $rawGcovDir);
+
+# make a temporary directory to put the gcov files into
+my $gcovOut = "$absBaseDir/gcov_out";
+mkdir $gcovOut;
+die "no gcov output directory: $gcovOut" unless -d $gcovOut;
+
+# make a directory to put the source files into
+my $preservedSourceFiles = "$absBaseDir/source_files";
+mkdir $preservedSourceFiles;
+die "no preserved Source Files directory: $preservedSourceFiles" unless -d $preservedSourceFiles;
+# source files to preserve that aren't in displayNameToSource
+my %preserveSourceFiles;
+
+# index to start from
+$minIndex = -1 if !defined($minIndex);
+
+# workloads
+my @wkloads;
+readWorkloadsFile(\@wkloads, $workloadsFile);
+die "ERROR your workloads file '$workloadsFile' seems to be empty" unless @wkloads;
+
+# source files / gcno files
+my %displaynameToGcno;
+my %displaynameToSource;
+readSourcefileMap(\%displaynameToGcno, \%displaynameToSource, $sourcefileMap);
+die "ERROR: your source file map '$sourcefileMap' seems to be empty" unless (keys %displaynameToGcno);
+die "ERROR: your source file map '$sourcefileMap' seems to be empty" unless (keys %displaynameToSource);
+
+# dsw: For use by File::Find::find below
+sub removeGcovFiles {
+    if (/^.*\.gcda\z/s || /^.*\.da\z/s || /^.*\.gcov\z/s) {
+        unlink($_);
+    }
+}
+
+# log printing stuff
+my $log = "$rawGcovDir/LOG";
+open(LOGFILE, '>>', $log) or warn "WARNING $log: $!";
+sub logprint {
+    print LOGFILE @_;
+}
+
+sub warnAndLog {
+    warn @_;
+    logprint @_;
+}
+
+my $workloadsDone = 0;
+# foreach workload, 
+#   remove .da files
+#   run program on that workload
+#   find source file corresponding to .da files
+#   run gcov, move .gcov files to $workloadDataFile
+foreach my $wkload (@wkloads) {
+    chdir $absBaseDir or die "STRANGE ERROR: chdir $absBaseDir failed: $!";
+    my $workloadName = $wkload->{'name'};
+    if ($wkload->{'index'} < $minIndex) {
+        warnAndLog("Skipping $workloadName because (wkloadIndex:$wkload->{'index'} < minIndex:$minIndex)\n");
+        next;
+    }
+    my $workloadDataFile = "$rawGcovDir/$wkload->{'filename'}.zip";
+    my $workloadDataZip = Archive::Zip->new();
+    # parallel arrays for recording info about this workload
+    my @locs;
+    my @counts;
+
+    # get rid of old .da .gcda .gcov files
+    File::Find::find( {wanted => \&removeGcovFiles, follow => 1}, "$absSrcDir");
+    File::Find::find( {wanted => \&removeGcovFiles, follow => 1}, "$absObjDir");
+
+    # run workload
+    logprint("\n******************************************\n");
+    logprint("*** running $workloadName; results will go in '$workloadDataFile'\n");
+    {
+        # setup alarm handler
+        my $timeout = 10 * 60;
+        my $alarmMsg = "workload timeout\n";
+        $SIG{ALRM} = sub { die $alarmMsg; };
+        # try the workload; we'll get a SIGALRM after $timeout seconds
+        my $res0;
+        eval {
+            alarm($timeout);
+            $res0 = system("$runWorkload $workloadName >> $log 2>&1");
+            # success; turn off the alarm
+            alarm(0);
+        };
+        # we're done with the alarm one way or the other
+        alarm(0); 
+        $SIG{ALRM} = sub {};        
+        # see if we timed out
+        if ($@) {
+            if ($@ eq $alarmMsg) {
+                # timeout
+                warnAndLog("\nWORKLOAD '$workloadName' TIMED OUT after $timeout seconds\n");
+                next;
+            } else {
+                # some other problem
+                warnAndLog("\nWORKLOAD FAILED mysteriously: $@\n");
+                next;
+            }
+        }
+        # did the workload succeed?
+        if (defined($res0)){
+            if (0 != $res0) {
+                warnAndLog("\nWORKLOAD FAILED: $workloadName: " . explainDeath($res0) . "\n");
+                next;            
+            } else {
+                logprint "\n*** SUCESS $workloadName done running\n";
+            }
+        }
+    }
+
+    # run gcov for any .gcda files; summarize results and save them 
+    logprint("***Workload '$workloadName' sucessful; starting gcov stuff\n") if ($debugMode);
+    foreach my $displayName (keys %displaynameToGcno) {
+        my $absSrcFile = "$absBaseDir/$displaynameToSource{$displayName}"; # absolute path
+        my $srcFileName = $absSrcFile;
+        $srcFileName =~ s,^.*/([^/]*)$,$1,;
+        my $absGcno = "$absBaseDir/$displaynameToGcno{$displayName}"; # absolute path
+        die "ERROR: couldn't find a piece of gcov metadata '$absGcno'; Is $sourcefileMap up to date?" unless -f $absGcno;
+        # compute name of .gcda
+        my $absGcda = $absGcno;
+        $absGcda =~ s/\.gcno$/.gcda/;
+        $absGcda =~ s/\.(bb|bbg)$/.da/;
+        next unless -f $absGcda;
+
+        # change to a directory where gcov will not find the source file
+        chdir $gcovOut or die "STRANGE ERROR: chdir $gcovOut failed: $!";
+        die "STRANGE ERROR '$absGcda' existed a moment ago, but is gone now" unless (-f $absGcda);
+
+        # get rid of any old .gcov files
+        opendir(DIR, $gcovOut) or die "STRANGE ERROR: can't opendir $gcovOut: $!";
+        while ( my $file = readdir(DIR) ) {
+            next if ($file =~ m/^\.$/ || $file =~ m/^\.\.$/);
+            my $absFile = "$gcovOut/$file";
+            if (-f $absFile) {
+                logprint("***Deleting $absFile\n") if ($debugMode);
+                unlink $absFile or die "Failed to unlink '$absFile': $!\n";
+            } else {
+                warnAndLog("NON-REGULAR FILE IGNORED: '$absFile'\n") if ($debugMode);
+            }
+        }
+        closedir(DIR) or die "STRANGE ERROR: can't closedir $gcovOut: $!";
+
+        # run gcov
+        my $cmd = qq{$gcovProgram --all-blocks --branch-counts --preserve-paths --object-file="$absGcda" bogus_sourcefile_name >> $log 2>&1};
+        logprint("\n***Running gcov: '$cmd' (workload=$workloadName)(gcda='$absGcda')\n");
+        my $res1 = system($cmd);
+        if ($res1) {
+            my $msg = "WARNING: '" . $cmd . "' " . explainDeath($res1) . "\n";            
+            warnAndLog($msg);
+        }
+        chdir $absBaseDir or die "STRANGE ERROR: chdir $absBaseDir failed: $!";
+
+        # digest all the gcov files and save the data in $workloadDataZip
+        opendir(DIR, $gcovOut) or die "STRANGE ERROR: can't opendir $gcovOut: $!";
+        while ( my $gcov = readdir(DIR) ) {
+            next if ($gcov =~ m/^\.$/ || $gcov =~ m/^\.\.$/);
+            my $absGcov = "$gcovOut/$gcov";
+            if (-f $absGcov && $gcov =~ /\.gcov$/) {
+                # create a name for the sourcefile that this .gcov file is reporting;
+                # the simple case is when it's foo.c.gcov for sourcefile foo.c;
+                # when code is included, we get bar.h.gcov and call it foo.c#bar.h
+                #
+                # FIX: <?> this code requires guessing 
+                # for something in 0_config/srcfiles ($gcno, $srcfile, $displayName), we want
+                # 1) to GUESS the name of the gcov, $gcovForSrc
+                # 2) record the data in $gcovForSrc under $displayName
+                # 3) preserve the source file ($srcFile) as $displayName
+                # for any other .gcov files that come out of running gcov on $gcno's $gcda
+                # 1) recognize it as such since ($gcov != $gcovForSrc)
+                # 2) create a new name, $name as something like "$displayName#$gcov"
+                # 3) record the data under $name
+                # 4) find the corresponding source code by parsing $gcov and preserve it as $name
+                my $name = ($gcov eq "$srcFileName.gcov" || $gcov eq "$displayName.gcov") 
+                    ? $displayName  :  ($displayName . "\#" . $gcov);
+                for (my $i=0; $i<10; ++$i) { $name =~ s,[^\#]*[\#]+[\^],,; }
+                $name =~ s,[\n\s\"\'\`],_,g;  $name =~ s,/+,\#,g;  $name =~ s,\.gcov$,,;
+                # sfg: creating directories seems to be unnecessary;
+                # names that contain '/' are expanded and directories
+                # created on unzip; furthermore, the directories
+                # require a check when iterating over all locations
+                ## $workloadDataZip->addDirectory("$name/");
+                # ensure that there is source code (called $name) that corresponds to this .gcov
+                preserve(\%preserveSourceFiles, $absSrcFile, $gcov, "$preservedSourceFiles/$name");
+                # read the gcov file, summarize lines with data to WORKLOADDATA
+                open(GCOV, '<', $absGcov) or die "STRANGE ERROR: can't open $absGcov: $!\n";
+                logprint("***Summarizing '$absGcov'\n");
+                while (my $gcovline = <GCOV>) {
+                    my ($line, $block, $count) = parseGcovLine($gcovline);
+                    if (defined($line)) {
+                        $block = '' if !defined($block);
+                        die "STRANGE ERROR: line=$line, but count undefined" if !defined($count);
+                        my $loc = "$name/$line.$block";
+                        $loc =~ s,\.$,,;
+                        $loc =~ s,\t,_,g; # just to be extra safe
+                        $count =~ s,\t,,g;
+                        if ($loc && $count) {
+                            push(@locs, $loc);
+                            push(@counts, $count);
+                        }
+                    }
+                }
+                close(GCOV) or die "STRANGE ERROR: can't close $absGcov: $!\n";
+            } else {
+                warnAndLog("NON-REGULAR FILE SKIPPED: '$absGcov'\n") if ($debugMode);
+            }
+        }
+        closedir(DIR) or die "STRANGE ERROR: can't closedir $gcovOut: $!";
+    } #for gcno
+
+    # save data for this workload
+    die "VERY BAD ERROR: counts:$#counts != locs:$#locs" unless ($#counts == $#locs);
+    my $mem1 = $workloadDataZip->addString(join("\t", @locs), 'locations');
+    $mem1->desiredCompressionMethod( COMPRESSION_DEFLATED );
+    my $mem2 = $workloadDataZip->addString(join("\t", @counts), 'counts');
+    $mem2->desiredCompressionMethod( COMPRESSION_DEFLATED );
+    $workloadDataZip->writeToFileNamed($workloadDataFile) == AZ_OK 
+        or die "ERROR writing '$workloadDataFile' ";
+    # progress dots; eye candy for the user
+    $workloadsDone++;
+    print ".";
+    print " " if (0 == $workloadsDone % 10);
+    print "\n" if (0 == $workloadsDone % 50);
+    print "\n" if (0 == $workloadsDone % 1000);
+} # for workload
+
+# preserve source files in case we missed any before
+foreach my $displayName (keys(%displaynameToSource)) {
+    my $from = $displaynameToSource{$displayName};
+    my $to = "$preservedSourceFiles/$displayName";
+    copy($from, $to) or warnAndLog("WARNING: copy from '$from' to '$to' failed: $!");
+}
+
+# done
+print "\n*** Ran $workloadsDone workloads\n";
+close(LOGFILE) or warn "WARNING $log: $!";
+exit(0);
+
+
+sub preserve {
+    my ($files, $abssrcfile, $gcov, $to) = @_;
+    return if $files->{$to};
+    my $from = $gcov;
+    $from =~ s,\.gcov$,,;
+    $from =~ s,\#,/,g;
+    $from =~ s,\^,..,g;
+    if ($from !~ m,^/,) {
+        # relative path from source file
+        my $pathToSrcFile = $abssrcfile;
+        $pathToSrcFile =~ s,/[^/]*$,,;
+        $from = "$pathToSrcFile/$from";
+    }
+    if (-f $from) {
+        $files->{$to} += 1;
+        copy($from, $to) or warnAndLog("WARNING: copy from '$from' to '$to' failed: $!");
+    } else {
+        warnAndLog("WARNING: can't find '$from' for '$abssrcfile':'$gcov'");
+    }
+}

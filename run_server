@@ -1,0 +1,128 @@
+#!/usr/bin/perl -w
+
+#
+# see License.txt for copyright and terms of use
+#
+
+# Step 4 continued: Run the server so the file and model pages can be
+# generated on-demand.
+
+use strict;
+use IO::Socket;
+use FindBin;
+use lib $FindBin::Bin;
+use trend_prof_common;
+
+# **** global state
+my $port;                       # port we serve on
+my $dataDir;                    # directory containing the source files
+my $fitDir;                     # directory containing results of fitting
+my $viewDir;                    # directory containing the view; we server this
+my $title = "Trend Profile";    # title for the web page
+my @views_flags;                # sub-langauge of view parameters
+my $clusterFile;		# contains map from location to cluster
+
+# **** parse the command line arugments
+while(my $arg = shift @ARGV) {
+    if ($arg =~ /^--port=(.*)$/) {
+        $port = $1;
+    } elsif ($arg =~ /^--data-dir=(.*)$/) {
+        $dataDir = $1;
+    } elsif ($arg =~ /^--fit-dir=(.*)$/) {
+        $fitDir = $1;
+    } elsif ($arg =~ /^--view-dir=(.*)$/) {
+        $viewDir = $1;
+    } elsif ($arg =~ /^--title=(.*)$/) {
+        $title = $1;
+    } elsif ($arg =~ /^--cluster-file=(.*)$/) {
+	$clusterFile = $1;
+    } elsif ($arg =~ /^--view=(.*)$/) {
+        # NOTE: we just copy the entire flag as we will pass that on completely
+        push @views_flags, $arg;
+    } else {
+        die "Illegal argument:$arg:\n";
+    }
+}
+die "You must provide a port number." unless defined $port;
+die "Invalid --data-dir" unless defined $dataDir && -d $dataDir;
+die "Invalid --fit-dir"  unless defined $fitDir  && -d $fitDir;
+die "Invalid --view-dir" unless defined $viewDir && -d $viewDir;
+die "Provide a title" unless defined $title;
+#die "Provide some views" unless (0<+@views_flags);
+
+die "Can't find do_4_view" unless -x "$FindBin::Bin/do_4_view";
+my $do_4_view = "$FindBin::Bin/do_4_view --data-dir=${dataDir} --fit-dir=${fitDir} --view-dir=${viewDir} --title=\"${title}\" ". join(' ', @views_flags) . (defined($clusterFile) ? " --cluster-file=${clusterFile} " : '');
+
+# start the server
+my $server = IO::Socket::INET->new
+(LocalPort => $port,
+ Type      => SOCK_STREAM,
+ Reuse     => 1,
+ Listen    => SOMAXCONN,
+);
+die "failed to start server" unless $server;
+print "Trend-prof UI server is listening on http://localhost:$port\n";
+
+# event loop
+while(my $connection = $server->accept()) {
+    $connection->autoflush(1);
+
+    # parse the request
+    my $line = <$connection>;
+    chomp $line;
+    print "Request:$line\n";
+    my $file0;
+    if ($line =~ m|^GET /(.*) HTTP/.*$|) {
+        $file0 = $1;
+    } else {
+        print $connection "HTTP/1.0 404 BAD REQUEST\nContent-type: text/html\n\n";
+        print $connection "Your client has made a request that we do not understand.\n";
+        next;
+    }
+    my $file = urlDecode($file0);
+    print "file:$file\n";
+
+    # trend-prof specific: make the file lazily if we can or die trying
+    if (! -e $file) {
+        if ($file =~ m|^(?:.*)?4_view/([^/]+)/index\.html(?:\#.*)?$|) {
+            # this is a request for an annotated source file
+            my ($srcFile) = ($1);
+            print "\n\nsrcFile:$srcFile:\n";
+            die "parsing of srcFile failed" unless defined $srcFile;
+            my $cmd = "${do_4_view} --sourceFile_modeParam=${srcFile} --mode=single_source_mode";
+            print "$cmd\n";
+            runOrWarn($cmd);
+        } elsif ($file =~ m,^(?:.*/)?4_view/([^/]+)/([^/]+)/(?:index\.html|[^/]*\.png)$,) {
+            # this is a request for a model file
+            my ($srcFile, $location) = ($1, $2);
+            warn "parsing of srcFile failed" unless defined $srcFile;
+            warn "parsing of location failed" unless defined $location;
+            my $cmd = "${do_4_view} --sourceFile_modeParam=${srcFile} --location_modeParam=${location} --mode=single_model_mode --run-gnuplot";
+            print "$cmd\n";
+            runOrWarn($cmd);
+        } else {
+            print $connection "HTTP/1.0 404 FILE NOT FOUND\nContent-type: text/html\n\n";
+            print $connection "This URL is not well-formed:$file:\n";
+            print "This URL is not well-formed:$file:\n";
+            next;
+        }
+    }
+
+    # the file had better exist by now
+    if (! -e $file) {
+        print $connection "HTTP/1.0 404 FILE NOT FOUND\nContent-type: text/html\n\n";
+        print $connection "File '$file' does not exist on our server.\n";
+        next;
+    }
+
+    # serve the file
+    print $connection "HTTP/1.0 200 OK\nContent-type: text/html\n\n";
+    open (FILE, $file) or die "File exists, but I can't open it: $file\n";
+    while(<FILE>) { print $connection $_; }
+    close (FILE) or die "Can't close file: $file\n";
+}
+continue {
+    # close the connection
+    print "Closing connection.\n";
+    close $connection;
+}

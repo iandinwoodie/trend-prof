@@ -1,0 +1,226 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+
+<head>
+   <meta http-equiv="content-type" content="text/html; charset=iso-8859-1">
+
+   <style type="text/css">
+   BODY {
+	background-color : #FFFFFF;
+        }
+   </style>
+
+   <title>Schema of a Trend Profile</title>
+</head>
+
+<body>
+
+<h1>Schema of a Trend Profile</h1>
+
+<h3>Directory contents</h3>
+
+<p>Other documents in this directory that you will want to consult.
+<ul>
+<li> The <a href="manifest.html">Manifest of Trend Profiler</a> lists and describes the
+files in the project.
+</li>
+<li> The <a href="index.html">Documentation for Trend Profiler</a>.
+</li>
+</ul>
+
+<!-------------------------------------------------------------------->
+<h3> Getting started </h3>
+
+<p>
+After making a Trend Profile with <tt>make profdir/foo</tt>, the
+profdir "foo" will contain:
+
+<ul>
+<li><b>0_config</b>
+<p>a directory 
+</p></li>    
+
+<li><b>Makefile</b>
+<p>a symlink back to <tt>trend-prof</tt>'s Config.mk
+</p></li>    
+
+</ul>
+
+<!-------------------------------------------------------------------->
+<h3> User input </h3>
+
+<p>The user must then supply:
+
+<ul>
+
+<li><b>0_config/workloads</b>
+
+<p>Lists all the names and sizes of workloads to run.  Workload names
+must not start with whitespace nor contain newlines.  See
+examples/quick_sort/0_config/workloads for an example of the required
+format.  Use workloads_from_dir to make such a file from a directory.
+</p></li>    
+
+<li><b>0_config/run_workload</b>
+<p>A script.  Given a name as its first argument, runs that workload.
+</p></li>    
+
+<li><b>0_config/src</b>
+<p>A directory containing (or symlink to) the source code of the program to be
+profiled.
+</p></li>    
+
+<li><b>0_config/obj</b>
+
+<p>A directory containing (or symlink to) the compiled object code of the program
+to be profiled.  May be a symlink to src.  <tt>trend-prof</tt> looks for the gcov metadata
+here.  
+</p></li>    
+
+</ul>
+
+<!-------------------------------------------------------------------->
+<h3> <tt>trend-prof</tt> creates </h3>                          
+
+<p>Running "make" from foo will then create:
+
+<ul>
+
+<li><b>0_config/source_files</b> <p>a map from gcov metadata files
+(.gcno/.gcda) to source files.  Display names must be unique.  Display
+names and filenames must not start with whitespace nor contain
+newlines.  All paths are are relative to the profdir.  If guessing fails,
+you may wish to edit this file (before proceeding past step 0) so that
+<tt>trend-prof</tt> can find the source and thus generate annotated
+source in step 4.  Run "make test" and check
+examples/quick_sort/0_config/source_files for an example of the
+format.
+</p></li>    
+
+<li><b>1_rawgcov/</b>
+<p>first data directory 
+
+<ul>
+<li><b>LOG</b> <p>a log of running that workload and running gcov on all the
+source files; <tt>trend-prof</tt> reports status and problems to the log; it also
+redirects the output of <tt>run_workload</tt> and <tt>gcov</tt> to the log
+</p></li>    
+
+<li><b>nnnn_workload_name.data.zip</b>
+
+<p>for each workload: coverage data for this workload; this zip file contains a
+file called <tt>locations</tt> and another called <tt>counts</tt> that contain a
+tab separated list of "locations" (a location is roughly a line of source code;
+they are of the form "source_file/line_number.basic_block_number"; for instance
+main.c/17.2) and a tab-separated list of counts that show how many times each
+basic block was executed during that workload
+</p></li>    
+
+</ul>
+</li>    
+
+<li><b>source_files</b> <p>This directory contains copies of all of the source
+files listed in <tt>0_config/source_files</tt>.  They are copied here during step
+1.  These files are copied at this time in case the source code changes or moves.
+In particular, one can move only <tt>source_files</tt> and <tt>2_linewise</tt>
+to another machine to finish the rest of steps of <tt>trend-prof</tt>.
+</p></li>
+
+<li><b>2_linewise/data.zip</b>
+
+<p>second data directory; the <tt>data.zip</tt> file contains entries of the
+following form; there is a canonical order for all of the workloads
+that all of these files use.
+
+<ul>
+
+<li><b>source_file/line_number</b>, <b>source_file/line_number.basic_block</b>
+<p>contains a tab-separated list of execution counts for that
+location on each workload 
+</p></li>    
+
+<li><b>total</b>
+<p>contains a tab-separated list containing the total number of basic blocks executed
+by each workload 
+</p></li>    
+
+<li><b>workload_sizes</b>
+<p>the input size for each workload as specified in <tt>0_config/workloads</tt>
+</p></li>    
+
+</ul>
+
+<li><b>3_fit/data.fits.zip</b>
+<p>third data directory; the <tt>data.fits.zip</tt> contains results of fitting
+data to models in the following form; fit types are: linear, powerlaw.
+</p>
+<ul>
+<li><b>source_file/line_number</b>, <b>source_file/line_number.basic_block</b>
+<p>fitting results for this location; one fit per line; each line tab separated
+list of fit information for that fit
+</p></li>
+
+<li><b>total</b>
+<p>fitting results for input size vs total number of basic blocks executed for
+the whole program; same format as above
+</p></li>
+</ul></li>
+
+<li><b>4_view/</b>
+<p>html rendered results directory
+
+<ul>
+
+<li><b>index.html</b>
+<p>overall summary page
+</p></li>    
+
+<li><b>source_file/</b>
+<p>contains all of the results for source_file
+
+<ul>
+
+<li><b>index.html</b>
+<p>source code annotated with models
+</p></li>    
+
+<li><b>line_number/</b>, <b>line_number.basic_block/</b>
+<p> Directory containing data and plots for this location, as follows.
+
+<ul>
+<li><b>index.html</b>
+<p>summary of fits for this location
+</p></li>    
+
+<li><b>type.filtered.data</b>
+<p>three tab-separated columns: workload size, execution count for the workload,
+residual (observed execution count - predicted execution count) in the transformed
+space (what you'd expect for linear fits, log yhat - log y for power law fits)
+</p></li>    
+
+<li><b>type.gnuplot</b>
+<p>gnuplot to generate plots
+</p></li>    
+
+<li><b>type.png</b>
+<p>plot of points and fit
+</p></li>    
+
+<li><b>type.residulas.png</b>
+<p>plot of residuals
+</p></li>    
+</ul></li>    
+
+
+</ul></li>
+
+</ul></li>
+
+</ul>
+
+<!-- bar at the bottom -->
+<h2>&nbsp;</h2>
+
+</body>
+</html>

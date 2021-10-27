@@ -1,0 +1,15 @@
+#!/usr/bin/perl -w
+use strict;
+
+# convert from the output format of 'wc -l' to the workloads format
+
+while(<>) {
+  chomp;
+  die unless /^\s*(\d+) (.*)$/;
+  my ($size, $name) = ($1, $2);
+  die unless defined $size && defined $name;
+  print "workload:\n";
+  print "  name=$name\n";
+  print "  size=$size\n";
+  print "\n";
+}

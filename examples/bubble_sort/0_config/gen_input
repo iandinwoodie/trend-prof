@@ -1,0 +1,18 @@
+#!/usr/bin/perl -w
+use strict;
+
+my $n=$ARGV[0];
+die "usage: $0 range [seed]\n" unless defined $n;
+# print "n:$n\n";
+
+my $seed = 3.1415;
+if (defined $ARGV[1]) {
+  $seed = $ARGV[1];
+#  print "seed:$seed\n";
+}
+
+srand($seed);
+for (1..$n) {
+  my $x = int rand($n);
+  print "$x\n";
+}

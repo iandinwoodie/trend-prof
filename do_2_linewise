@@ -1,0 +1,98 @@
+#!/usr/bin/perl -w
+
+#
+# see License.txt for copyright and terms of use
+#
+
+# Step 2: Extracts data from the gcov coverage data and stores it in a
+# more useful format.
+
+use strict;
+use File::Find;
+use FindBin;
+use lib $FindBin::Bin;
+use trend_prof_common;
+my $debugMode = -f "$FindBin::Bin/.debug";
+use Archive::Zip qw( :ERROR_CODES :CONSTANTS );
+
+# TODO: describe
+
+# cmd line, hard-wired stuff, checks
+die "Usage: $0  workloadsFile  rawGcovDir  linewiseDir\n" unless (2 == $#ARGV);
+my ($workloadsFile, $rawGcovDir, $linewiseDir) = @ARGV;
+die "ERROR: couldn't find $workloadsFile\n" unless (-r $workloadsFile);
+die "ERROR: couldn't find $rawGcovDir\n" unless (-d $rawGcovDir);
+mkdir $linewiseDir;
+die "ERROR: couldn't create $linewiseDir\n" unless -d $linewiseDir;
+
+# read in sizes of workloads
+my @wkloads;
+readWorkloadsFile(\@wkloads, $workloadsFile);
+die "ERROR: your workloads file '$workloadsFile' seems to be empty\n" unless @wkloads;
+
+# input
+my %locationToCounts;
+my $pointsRead = 0;
+my $numworkloads = $#wkloads+1;
+my @totalPerWorkload;
+my @sizes;
+my $workloadsDone = 0;
+# sfg: maybe a useless opt, maybe saves some array allocation
+my @sworkloads = sort { $b->{'index'} <=> $a->{'index'} } @wkloads;
+foreach my $wkload (@sworkloads) {
+    my $idx = $wkload->{'index'};
+    # store sizes in index order
+    $sizes[$idx] = $wkload->{'size'};
+    # track total bb executions per workload
+    $totalPerWorkload[$idx] = 0;
+    # read data for $wkload
+    my $datafile = "$rawGcovDir/$wkload->{'filename'}.zip";
+    unless (-r $datafile) {
+        warn "WARNING: skipping workload $wkload->{name} because '$datafile' does not exist'\n";
+        next;
+    }
+    my $workloadDataZip = Archive::Zip->new();
+    $workloadDataZip->read($datafile) == AZ_OK
+        or die "ERROR: reading '$datafile'";
+    my @locs = split("\t", $workloadDataZip->contents('locations'));
+    my @counts = split("\t", $workloadDataZip->contents('counts'));
+    undef $workloadDataZip;
+    for (my $i=0; $i <= $#locs; ++$i) {
+        my $loc = $locs[$i];
+        my $count = $counts[$i];
+        die "WARNING: loc undefined for i=$i" unless defined($loc);
+        die "WARNING: count undefined for i=$i, $loc" unless defined($count);
+        # sfg: auto-vivification makes this work fine even if $locationToCounts{$loc} is undef
+        $locationToCounts{$loc}->[$idx] = $count;
+        $totalPerWorkload[$idx] += $count;
+        $pointsRead++;
+    }
+    #todo: handle out of memory cases
+    $workloadsDone++;
+    print ".";
+    print " " if (0 == $workloadsDone % 10);
+    print "\n" if (0 == $workloadsDone % 50);
+    print "\n" if (0 == $workloadsDone % 1000);
+}
+
+# output
+my $outfile = "$linewiseDir/data.zip";
+my $ptsZip = Archive::Zip->new();
+foreach my $loc (keys(%locationToCounts)) {
+    for (my $i=0; $i < $numworkloads; ++$i) {
+        $locationToCounts{$loc}->[$i] = 0 if !defined($locationToCounts{$loc}->[$i]);
+    }
+    my $member = $ptsZip->addString(join("\t", @{$locationToCounts{$loc}}), $loc);
+    $member->desiredCompressionMethod( COMPRESSION_STORED );
+}
+# write total bb executions for each workload
+my $member1 = $ptsZip->addString(join("\t", map { defined($_) ? $_ : 0 } @totalPerWorkload), 'total');
+$member1->desiredCompressionMethod( COMPRESSION_STORED );
+# write size ofr each workload
+my $member2 = $ptsZip->addString(join("\t", map { defined($_) ? $_ : 0 } @sizes), 'workload_sizes');
+$member2->desiredCompressionMethod( COMPRESSION_STORED );
+$ptsZip->writeToFileNamed($outfile) == AZ_OK
+    or die "ERROR writing '$outfile' ";
+
+print "\n*** Read $pointsRead points from $workloadsDone workloads\n";
+exit(0);
